@@ -1,8 +1,8 @@
 import { v } from "convex/values";
 
-import { mutation, query } from "./_generated/server";
+import { internalMutation, internalQuery } from "./_generated/server";
 
-export const record = mutation({
+export const record = internalMutation({
   args: {
     label: v.string(),
   },
@@ -14,7 +14,7 @@ export const record = mutation({
   },
 });
 
-export const latest = query({
+export const latest = internalQuery({
   args: {},
   handler: async (ctx) => {
     return await ctx.db.query("setupChecks").order("desc").first();

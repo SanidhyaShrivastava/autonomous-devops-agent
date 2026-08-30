@@ -8,6 +8,9 @@
  * @module
  */
 
+import type * as demo from "../demo.js";
+import type * as lib_guards from "../lib/guards.js";
+import type * as runner from "../runner.js";
 import type * as setupChecks from "../setupChecks.js";
 
 import type {
@@ -17,6 +20,9 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  demo: typeof demo;
+  "lib/guards": typeof lib_guards;
+  runner: typeof runner;
   setupChecks: typeof setupChecks;
 }>;
 
