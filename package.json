@@ -6,7 +6,12 @@
     "dev": "next dev",
     "build": "next build",
     "start": "next start",
-    "lint": "eslint"
+    "lint": "eslint",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:runner": "vitest run tests/sanitize.test.ts tests/docker-adapter.test.ts",
+    "demo:build": "docker buildx build --pull --load --tag gx-autodevops-demo-service:m0 ./demo-service",
+    "demo:proof": "tsx scripts/m0-runner-proof.ts"
   },
   "dependencies": {
     "convex": "^1.45.0",
