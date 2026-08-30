@@ -13,12 +13,24 @@ import {
 } from "@testing-library/react";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
+vi.hoisted(() => {
+  process.env.NEXT_PUBLIC_CONVEX_URL = "https://test.convex.cloud";
+});
+
 const convexMock = vi.hoisted(() => ({
   useQuery: vi.fn(),
+}));
+const convexHttpMock = vi.hoisted(() => ({
+  query: vi.fn(),
 }));
 
 vi.mock("convex/react", () => ({
   useQuery: convexMock.useQuery,
+}));
+vi.mock("convex/browser", () => ({
+  ConvexHttpClient: class {
+    query = convexHttpMock.query;
+  },
 }));
 
 import { DemoDashboard } from "@/components/demo-dashboard";
@@ -29,6 +41,10 @@ function publicState(
   overrides: Record<string, unknown> = {},
 ): Record<string, unknown> {
   return {
+    snapshotAt: BASE_TIME,
+    demoCommandId: null,
+    commandStatus: null,
+    commandExpiresAt: null,
     runnerOnline: true,
     enabled: true,
     active: false,
@@ -121,8 +137,7 @@ function resolvedState() {
         role: "verifier",
         kind: "verification_completed",
         safeCommandLabel: "HTTP GET fixed demo health",
-        sanitizedOutput:
-          '{"healthy":true,"httpStatus":200,"status":"healthy"}',
+        sanitizedOutput: '{"healthy":true,"httpStatus":200,"status":"healthy"}',
         latencyMs: 220,
       }),
     ],
@@ -139,6 +154,7 @@ function resolvedState() {
 describe("public recovery dashboard", () => {
   beforeEach(() => {
     convexMock.useQuery.mockReset();
+    convexHttpMock.query.mockReset();
     vi.stubGlobal("fetch", vi.fn());
   });
 
@@ -153,10 +169,12 @@ describe("public recovery dashboard", () => {
 
     render(<DemoDashboard />);
 
-    expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
-      "Loading live recovery state",
-    );
-    expect(screen.queryByText("Recovered successfully")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Loading live recovery state");
+    expect(
+      screen.queryByText("Recovered successfully"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows runner offline in text and explains why reset is disabled", () => {
@@ -167,9 +185,9 @@ describe("public recovery dashboard", () => {
     render(<DemoDashboard />);
 
     expect(screen.getByText("Runner offline")).toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
-      "Waiting for runner",
-    );
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Waiting for runner");
     const button = screen.getByRole("button", { name: "Run recovery demo" });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(
@@ -184,9 +202,9 @@ describe("public recovery dashboard", () => {
 
     render(<DemoDashboard />);
 
-    expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
-      "Public demo disabled",
-    );
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Public demo disabled");
     expect(screen.queryByText("Ready to run")).not.toBeInTheDocument();
   });
 
@@ -197,9 +215,9 @@ describe("public recovery dashboard", () => {
 
     expect(screen.getByText("Runner online")).toBeInTheDocument();
     expect(screen.getByText("Service ready")).toBeInTheDocument();
-    expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
-      "Ready to run",
-    );
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Ready to run");
     expect(
       screen.getByRole("heading", {
         level: 1,
@@ -251,7 +269,11 @@ describe("public recovery dashboard", () => {
     let currentState = publicState();
     convexMock.useQuery.mockImplementation(() => currentState);
     const fetchMock = vi.mocked(fetch);
-    fetchMock.mockResolvedValue(new Response(null, { status: 202 }));
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ demoCommandId: "command_1" }), {
+        status: 202,
+      }),
+    );
 
     const view = render(<DemoDashboard />);
     fireEvent.click(screen.getByRole("button", { name: "Run recovery demo" }));
@@ -266,12 +288,133 @@ describe("public recovery dashboard", () => {
     });
     view.rerender(<DemoDashboard />);
 
-    expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
-      "Investigating evidence",
-    );
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Investigating evidence");
     expect(
       screen.getByRole("status", { name: "Demo status" }),
     ).not.toHaveTextContent("Recovery demo started");
+  });
+
+  it("refreshes the exact accepted run once per second and stops at its terminal state", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIME);
+    const previousResolvedState = resolvedState();
+    convexMock.useQuery.mockImplementation((_query, args) =>
+      args === "skip" || (typeof args === "object" && "demoCommandId" in args)
+        ? undefined
+        : previousResolvedState,
+    );
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ demoCommandId: "command_1" }), {
+        status: 202,
+      }),
+    );
+    convexHttpMock.query
+      .mockResolvedValueOnce(
+        publicState({
+          snapshotAt: BASE_TIME + 1_000,
+          demoCommandId: "command_1",
+          commandStatus: "claimed",
+          commandExpiresAt: BASE_TIME + 90_000,
+          active: true,
+          incident: incident("investigating"),
+          steps: [step(1)],
+        }),
+      )
+      .mockResolvedValueOnce({
+        ...resolvedState(),
+        snapshotAt: BASE_TIME + 2_000,
+        demoCommandId: "command_1",
+        commandStatus: "complete",
+        commandExpiresAt: BASE_TIME + 90_000,
+      });
+
+    render(<DemoDashboard />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Run recovery demo" }),
+      );
+      await Promise.resolve();
+    });
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Runner starting recovery");
+    expect(screen.queryByText("12.4s")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Investigating evidence");
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Recovered successfully");
+    const callsAtTerminalState = convexHttpMock.query.mock.calls.length;
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(convexHttpMock.query).toHaveBeenCalledTimes(callsAtTerminalState);
+  });
+
+  it("reports an accepted reset honestly when its response body is unreadable", async () => {
+    convexMock.useQuery.mockReturnValue(publicState());
+    vi.mocked(fetch).mockResolvedValue(
+      new Response("not-json", { status: 202 }),
+    );
+
+    render(<DemoDashboard />);
+    fireEvent.click(screen.getByRole("button", { name: "Run recovery demo" }));
+
+    expect(
+      await screen.findByText(
+        "Recovery demo was accepted. Waiting for live state.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("The demo could not start. No action was taken."),
+    ).not.toBeInTheDocument();
+  });
+
+  it("bounds fallback refreshes when the runner disappears", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIME);
+    convexMock.useQuery.mockImplementation((_query, args) =>
+      args === "skip" || (typeof args === "object" && "demoCommandId" in args)
+        ? undefined
+        : publicState(),
+    );
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ demoCommandId: "command_1" }), {
+        status: 202,
+      }),
+    );
+    convexHttpMock.query.mockRejectedValue(new Error("runner unavailable"));
+
+    render(<DemoDashboard />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Run recovery demo" }),
+      );
+      await Promise.resolve();
+    });
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(90_500);
+    });
+    const callsAtExpiry = convexHttpMock.query.mock.calls.length;
+    expect(callsAtExpiry).toBeGreaterThan(0);
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(convexHttpMock.query).toHaveBeenCalledTimes(callsAtExpiry);
   });
 
   it("shows the active phase in text and blocks a second run", () => {
@@ -285,9 +428,9 @@ describe("public recovery dashboard", () => {
 
     render(<DemoDashboard />);
 
-    expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
-      "Investigating evidence",
-    );
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Investigating evidence");
     const button = screen.getByRole("button", { name: "Run recovery demo" });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(
@@ -344,7 +487,9 @@ describe("public recovery dashboard", () => {
     act(() => vi.advanceTimersByTime(15_100));
 
     expect(screen.getByText("Runner offline")).toBeInTheDocument();
-    expect(screen.getByText("Service unavailable")).toHaveClass("badge-neutral");
+    expect(screen.getByText("Service unavailable")).toHaveClass(
+      "badge-neutral",
+    );
     expect(
       screen.getByRole("button", { name: "Run recovery demo" }),
     ).toBeDisabled();
@@ -355,10 +500,12 @@ describe("public recovery dashboard", () => {
 
     render(<DemoDashboard />);
 
-    expect(screen.getAllByText("Recovered successfully").length).toBeGreaterThan(0);
-    expect(screen.getAllByText("Healthy after fresh check").length).toBeGreaterThan(
-      0,
-    );
+    expect(
+      screen.getAllByText("Recovered successfully").length,
+    ).toBeGreaterThan(0);
+    expect(
+      screen.getAllByText("Healthy after fresh check").length,
+    ).toBeGreaterThan(0);
     expect(screen.getByText("12.4s")).toBeInTheDocument();
     expect(
       screen.queryByText("Cost unavailable with ChatGPT subscription login"),
@@ -505,7 +652,9 @@ describe("public recovery dashboard", () => {
     expect(
       screen.getByText("docker start fixed demo service · attempt failed"),
     ).toBeInTheDocument();
-    expect(screen.queryByText("No recovery action executed")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("No recovery action executed"),
+    ).not.toBeInTheDocument();
   });
 
   it("shows an investigation failure as requiring an engineer", () => {
@@ -539,7 +688,9 @@ describe("public recovery dashboard", () => {
 
     render(<DemoDashboard />);
 
-    expect(screen.getByText("Investigation did not complete")).toBeInTheDocument();
+    expect(
+      screen.getByText("Investigation did not complete"),
+    ).toBeInTheDocument();
     expect(screen.getByText("Service unhealthy")).toBeInTheDocument();
     expect(screen.getByText("Required")).toBeInTheDocument();
   });

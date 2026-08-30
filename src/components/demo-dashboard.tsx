@@ -1,9 +1,12 @@
 "use client";
 
+import { ConvexHttpClient } from "convex/browser";
 import { useQuery } from "convex/react";
+import type { FunctionReturnType } from "convex/server";
 import { useEffect, useState, useTransition } from "react";
 
 import { api } from "../../convex/_generated/api";
+import type { Id } from "../../convex/_generated/dataModel";
 import { IncidentTimeline } from "./incident-timeline";
 import { ResolutionCard } from "./resolution-card";
 
@@ -21,6 +24,71 @@ const PHASE_LABELS: Record<string, string> = {
 };
 
 const RUNNER_FRESHNESS_MS = 15_000;
+const ACTIVE_RUN_REFRESH_MS = 1_000;
+const ACTIVE_RUN_REFRESH_LIMIT_MS = 90_000;
+const TERMINAL_COMMAND_STATUSES = new Set(["complete", "failed", "expired"]);
+
+type PublicDemoState = FunctionReturnType<typeof api.demo.getPublicState>;
+
+type TrackedRun = {
+  demoCommandId: Id<"demoCommands">;
+  refreshDeadline: number;
+};
+
+const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
+if (!convexUrl) {
+  throw new Error("NEXT_PUBLIC_CONVEX_URL is not configured");
+}
+const publicStateHttpClient = new ConvexHttpClient(convexUrl);
+
+function isTerminalCommandStatus(status: string | null | undefined) {
+  return (
+    status !== null &&
+    status !== undefined &&
+    TERMINAL_COMMAND_STATUSES.has(status)
+  );
+}
+
+function didCommandFailBeforeIncident(state: PublicDemoState | undefined) {
+  return (
+    state?.incident === null &&
+    (state.commandStatus === "failed" || state.commandStatus === "expired")
+  );
+}
+
+function freshestState(
+  subscribedState: PublicDemoState | undefined,
+  polledState: PublicDemoState | null,
+) {
+  if (!subscribedState) {
+    return polledState ?? undefined;
+  }
+  if (!polledState) {
+    return subscribedState;
+  }
+  return polledState.snapshotAt > subscribedState.snapshotAt
+    ? polledState
+    : subscribedState;
+}
+
+function acceptedRunPlaceholder(
+  latestState: PublicDemoState | undefined,
+  demoCommandId: Id<"demoCommands">,
+): PublicDemoState | undefined {
+  if (!latestState) {
+    return undefined;
+  }
+  return {
+    ...latestState,
+    demoCommandId,
+    commandStatus: "queued",
+    commandExpiresAt: null,
+    active: true,
+    incident: null,
+    steps: [],
+    result: null,
+  };
+}
 
 function useCooldownRemaining(
   cooldownUntil: number | null | undefined,
@@ -41,10 +109,13 @@ function useCooldownRemaining(
         return;
       }
 
-      timer = window.setTimeout(() => {
-        setClockTime(Date.now());
-        scheduleNextTick();
-      }, Math.min(1_000, remainingMs));
+      timer = window.setTimeout(
+        () => {
+          setClockTime(Date.now());
+          scheduleNextTick();
+        },
+        Math.min(1_000, remainingMs),
+      );
     };
 
     scheduleNextTick();
@@ -76,7 +147,11 @@ function useLiveRunnerOnline(
   );
 
   useEffect(() => {
-    if (!reportedOnline || runnerHeartbeatAt === null || runnerHeartbeatAt === undefined) {
+    if (
+      !reportedOnline ||
+      runnerHeartbeatAt === null ||
+      runnerHeartbeatAt === undefined
+    ) {
       return;
     }
 
@@ -132,7 +207,25 @@ function resetFailureMessage(status: number) {
 }
 
 export function DemoDashboard() {
-  const state = useQuery(api.demo.getPublicState, {});
+  const latestState = useQuery(api.demo.getPublicState, {});
+  const [trackedRun, setTrackedRun] = useState<TrackedRun | null>(null);
+  const trackedDemoCommandId = trackedRun?.demoCommandId ?? null;
+  const trackedRefreshDeadline = trackedRun?.refreshDeadline ?? 0;
+  const subscribedRunState = useQuery(
+    api.demo.getPublicState,
+    trackedDemoCommandId ? { demoCommandId: trackedDemoCommandId } : "skip",
+  );
+  const [polledRunState, setPolledRunState] = useState<PublicDemoState | null>(
+    null,
+  );
+  const trackedRunState = freshestState(subscribedRunState, polledRunState);
+  const trackedRunTerminal = isTerminalCommandStatus(
+    trackedRunState?.commandStatus,
+  );
+  const state = trackedDemoCommandId
+    ? (trackedRunState ??
+      acceptedRunPlaceholder(latestState, trackedDemoCommandId))
+    : latestState;
   const [requestNotice, setRequestNotice] = useState<{
     message: string;
     stateKey: string;
@@ -147,32 +240,87 @@ export function DemoDashboard() {
     state?.runnerHeartbeatAt,
   );
   const stateKey = state
-    ? `${state.active}:${state.incident?.incidentId ?? "none"}:${state.incident?.currentPhase ?? "none"}:${state.steps.length}`
+    ? `${state.demoCommandId ?? "none"}:${state.active}:${state.incident?.incidentId ?? "none"}:${state.incident?.currentPhase ?? "none"}:${state.steps.length}`
     : "loading";
+
+  useEffect(() => {
+    if (
+      trackedDemoCommandId === null ||
+      trackedRunTerminal ||
+      trackedRefreshDeadline <= Date.now()
+    ) {
+      return;
+    }
+
+    let requestInFlight = false;
+    let disposed = false;
+    const refresh = () => {
+      if (requestInFlight) {
+        return;
+      }
+      requestInFlight = true;
+      void publicStateHttpClient
+        .query(api.demo.getPublicState, {
+          demoCommandId: trackedDemoCommandId,
+        })
+        .then((nextState) => {
+          if (disposed) {
+            return;
+          }
+          setPolledRunState((currentState) =>
+            currentState === null ||
+            nextState.snapshotAt > currentState.snapshotAt
+              ? nextState
+              : currentState,
+          );
+        })
+        .catch(() => undefined)
+        .finally(() => {
+          requestInFlight = false;
+        });
+    };
+    const interval = window.setInterval(refresh, ACTIVE_RUN_REFRESH_MS);
+    const limit = window.setTimeout(
+      () => window.clearInterval(interval),
+      Math.max(0, trackedRefreshDeadline - Date.now()),
+    );
+
+    return () => {
+      disposed = true;
+      window.clearInterval(interval);
+      window.clearTimeout(limit);
+    };
+  }, [trackedDemoCommandId, trackedRefreshDeadline, trackedRunTerminal]);
 
   const phaseLabel = !state
     ? "Loading live recovery state"
-      : state.incident
+    : state.incident
       ? (PHASE_LABELS[state.incident.currentPhase] ?? "Incident in progress")
       : !state.enabled
         ? "Public demo disabled"
         : state.active
           ? "Runner starting recovery"
-          : !runnerOnline
-            ? "Waiting for runner"
-            : "Ready to run";
+          : didCommandFailBeforeIncident(state)
+            ? "Recovery could not start"
+            : !runnerOnline
+              ? "Waiting for runner"
+              : "Ready to run";
 
   let disabledReason: string | null = null;
   if (state === undefined) {
-    disabledReason = "The recovery demo is unavailable while live state is loading.";
+    disabledReason =
+      "The recovery demo is unavailable while live state is loading.";
   } else if (isStarting) {
     disabledReason = "The recovery demo is starting.";
   } else if (!state.enabled) {
-    disabledReason = "The recovery demo is unavailable because the public demo is disabled.";
+    disabledReason =
+      "The recovery demo is unavailable because the public demo is disabled.";
   } else if (!runnerOnline) {
-    disabledReason = "The recovery demo is unavailable because the Linux runner is offline.";
+    disabledReason =
+      "The recovery demo is unavailable because the Linux runner is offline.";
   } else if (state.active) {
-    disabledReason = "The recovery demo is unavailable while an incident is active.";
+    disabledReason =
+      "The recovery demo is unavailable while an incident is active.";
   } else if (cooldownRemainingMs > 0) {
     disabledReason = `The recovery demo is unavailable for ${Math.ceil(cooldownRemainingMs / 1_000)} more seconds.`;
   }
@@ -181,6 +329,7 @@ export function DemoDashboard() {
     setRequestNotice(null);
     const requestStateKey = stateKey;
     startReset(async () => {
+      let requestWasAccepted = false;
       try {
         const response = await fetch("/api/demo/reset", { method: "POST" });
         if (!response.ok) {
@@ -190,14 +339,29 @@ export function DemoDashboard() {
           });
           return;
         }
+        requestWasAccepted = true;
+
+        const payload = (await response.json()) as {
+          demoCommandId?: unknown;
+        };
+        if (typeof payload.demoCommandId !== "string") {
+          throw new Error("Demo response did not include a command ID");
+        }
 
         setRequestNotice({
           message: "Recovery demo started. Waiting for the runner.",
           stateKey: requestStateKey,
         });
+        setPolledRunState(null);
+        setTrackedRun({
+          demoCommandId: payload.demoCommandId as Id<"demoCommands">,
+          refreshDeadline: Date.now() + ACTIVE_RUN_REFRESH_LIMIT_MS,
+        });
       } catch {
         setRequestNotice({
-          message: "The demo could not start. No action was taken.",
+          message: requestWasAccepted
+            ? "Recovery demo was accepted. Waiting for live state."
+            : "The demo could not start. No action was taken.",
           stateKey: requestStateKey,
         });
       }
@@ -234,11 +398,13 @@ export function DemoDashboard() {
       ? "An operator must enable the public demo"
       : state.active
         ? "Recovery evidence is streaming below"
-        : !runnerOnline
-          ? "Waiting for a fresh runner heartbeat"
-          : state.incident
-            ? "Latest recorded incident"
-            : "Standing by for one isolated failure";
+        : didCommandFailBeforeIncident(state)
+          ? "The exact requested run ended before an incident was created"
+          : !runnerOnline
+            ? "Waiting for a fresh runner heartbeat"
+            : state.incident
+              ? "Latest recorded incident"
+              : "Standing by for one isolated failure";
   const railOutcome = recoveryRailOutcome(state?.incident?.currentPhase);
   const liveAnnouncement =
     requestNotice?.stateKey === stateKey ? requestNotice.message : phaseLabel;
@@ -255,8 +421,12 @@ export function DemoDashboard() {
           </div>
 
           <div className="headline-block">
-            <p className="section-kicker">One service · one safe recovery path</p>
-            <h1>Recover one failed Linux service safely in about 12 seconds.</h1>
+            <p className="section-kicker">
+              One service · one safe recovery path
+            </p>
+            <h1>
+              Recover one failed Linux service safely in about 12 seconds.
+            </h1>
             <p className="headline-summary">
               Watch the agent investigate the failure, pass an allowlist policy
               check, restart the disposable service, and verify fresh health.
@@ -266,21 +436,18 @@ export function DemoDashboard() {
           <p className="safety-line">
             <span aria-hidden="true">◆</span>
             Disposable demo container · allowlisted and policy-checked restart ·
-            no arbitrary shell access · no human approval step in this staged demo
+            no arbitrary shell access · no human approval step in this staged
+            demo
           </p>
         </div>
 
         <div className="control-deck">
           <div className="system-badges" aria-label="System status">
-            <span
-              className={`system-badge ${runnerBadgeClass}`}
-            >
+            <span className={`system-badge ${runnerBadgeClass}`}>
               <span className="status-dot" aria-hidden="true" />
               {state ? runnerLabel : "Checking runner"}
             </span>
-            <span
-              className={`system-badge ${serviceBadgeClass}`}
-            >
+            <span className={`system-badge ${serviceBadgeClass}`}>
               <span className="status-dot" aria-hidden="true" />
               {serviceLabel}
             </span>

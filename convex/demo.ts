@@ -105,42 +105,74 @@ export const requestRun = mutation({
 });
 
 export const getPublicState = query({
-  args: {},
-  handler: async (ctx) => {
+  args: { demoCommandId: v.optional(v.id("demoCommands")) },
+  handler: async (ctx, args) => {
     const now = Date.now();
     const control = await ctx.db
       .query("demoControl")
       .withIndex("by_key", (q) => q.eq("key", "singleton"))
       .unique();
 
-    const activeCommand = control?.activeDemoCommandId
-      ? await ctx.db.get(control.activeDemoCommandId)
+    const requestedCommand = args.demoCommandId
+      ? await ctx.db.get(args.demoCommandId)
       : null;
-    const activeIncident = control?.activeIncidentId
-      ? await ctx.db.get(control.activeIncidentId)
+    const requestedIncident = requestedCommand
+      ? await ctx.db
+          .query("incidents")
+          .withIndex("by_demo_command", (q) =>
+            q.eq("demoCommandId", requestedCommand._id),
+          )
+          .unique()
       : null;
-    const hasActiveRun = Boolean(
+    const activeCommand = args.demoCommandId
+      ? null
+      : control?.activeDemoCommandId
+        ? await ctx.db.get(control.activeDemoCommandId)
+        : null;
+    const activeIncident = args.demoCommandId
+      ? null
+      : control?.activeIncidentId
+        ? await ctx.db.get(control.activeIncidentId)
+        : null;
+    const hasControlActiveRun = Boolean(
       control?.activeDemoCommandId || control?.activeIncidentId,
     );
-    const latestHistoricalIncident = hasActiveRun
-      ? null
-      : await ctx.db
-          .query("incidents")
-          .withIndex("by_created_at")
-          .order("desc")
-          .first();
-    const displayedIncident = activeIncident ?? latestHistoricalIncident;
-    const displayedCommand = activeCommand
-      ? activeCommand
-      : displayedIncident
-        ? await ctx.db.get(displayedIncident.demoCommandId)
-        : hasActiveRun
-          ? null
-          : await ctx.db
-              .query("demoCommands")
-              .withIndex("by_created_at")
-              .order("desc")
-              .first();
+    const latestHistoricalIncident =
+      args.demoCommandId || hasControlActiveRun
+        ? null
+        : await ctx.db
+            .query("incidents")
+            .withIndex("by_created_at")
+            .order("desc")
+            .first();
+    const displayedIncident = args.demoCommandId
+      ? requestedIncident
+      : (activeIncident ?? latestHistoricalIncident);
+    const displayedCommand = args.demoCommandId
+      ? requestedCommand
+      : activeCommand
+        ? activeCommand
+        : displayedIncident
+          ? await ctx.db.get(displayedIncident.demoCommandId)
+          : hasControlActiveRun
+            ? null
+            : await ctx.db
+                .query("demoCommands")
+                .withIndex("by_created_at")
+                .order("desc")
+                .first();
+    const commandStatus = displayedCommand
+      ? displayedCommand.expiresAt <= now &&
+        displayedCommand.status === "queued"
+        ? "expired"
+        : displayedCommand.status
+      : null;
+    const hasActiveRun = args.demoCommandId
+      ? commandStatus !== null &&
+        commandStatus !== "complete" &&
+        commandStatus !== "failed" &&
+        commandStatus !== "expired"
+      : hasControlActiveRun;
 
     const descendingSteps = displayedCommand
       ? await ctx.db
@@ -160,6 +192,10 @@ export const getPublicState = query({
       : 0;
 
     return {
+      snapshotAt: now,
+      demoCommandId: displayedCommand?._id ?? null,
+      commandStatus,
+      commandExpiresAt: displayedCommand?.expiresAt ?? null,
       runnerOnline,
       enabled: control?.enabled ?? false,
       active: hasActiveRun,
@@ -182,10 +218,7 @@ export const getPublicState = query({
               ? sanitizeForPersistence(displayedIncident.finalHealth, 64)
               : null,
             incidentCategory: displayedIncident.incidentCategory
-              ? sanitizeForPersistence(
-                  displayedIncident.incidentCategory,
-                  120,
-                )
+              ? sanitizeForPersistence(displayedIncident.incidentCategory, 120)
               : null,
             diagnosisEvidence:
               displayedIncident.diagnosisEvidence?.map((evidence) =>

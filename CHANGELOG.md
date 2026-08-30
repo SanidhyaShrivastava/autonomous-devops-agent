@@ -11,3 +11,4 @@
 - A visitor can now inspect live runner status, recovery evidence, and measured verification results on one responsive screen.
 - A visitor can now trigger one disposable Linux-service failure and watch the agent investigate, restart, independently verify, and persist the real recovery trace.
 - A visitor can now see the verified outcome before collapsed raw evidence, with truthful policy and operation labels and no public model-login metadata.
+- A visitor can now receive fresh recovery state every second during an accepted run, with the refresh stopping as soon as the new run reaches its final result.

@@ -135,10 +135,7 @@ async function getControl(t: ConvexHarness) {
   });
 }
 
-async function patchControl(
-  t: ConvexHarness,
-  patch: Record<string, unknown>,
-) {
+async function patchControl(t: ConvexHarness, patch: Record<string, unknown>) {
   const control = await getControl(t);
   await t.run(async (ctx) => {
     await ctx.db.patch(control._id as never, patch as never);
@@ -210,7 +207,11 @@ async function createDetectedIncident(t: ConvexHarness) {
     initialHealth: "failed",
   })) as IncidentResult;
 
-  return { demoCommandId, commandStateVersion: confirmed.stateVersion, incident };
+  return {
+    demoCommandId,
+    commandStateVersion: confirmed.stateVersion,
+    incident,
+  };
 }
 
 async function moveIncidentToInvestigating(t: ConvexHarness) {
@@ -254,8 +255,7 @@ async function moveIncidentToPolicyCheck(
     ],
     diagnosisSummary: "The fixed demo service is stopped.",
     confidence: 0.91,
-    proposedActionId:
-      decision.proposedActionId ?? "restart_demo_service",
+    proposedActionId: decision.proposedActionId ?? "restart_demo_service",
     requiresHuman: decision.requiresHuman ?? false,
   })) as VersionResult;
   const policyCheck = (await t.mutation(updateIncidentPhase, {
@@ -444,12 +444,12 @@ describe("bounded demo command creation", () => {
       t.mutation(requestRun, { requestSecret: DEMO_SECRET }),
     ]);
 
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(
-      1,
-    );
-    expect(results.filter((result) => result.status === "rejected")).toHaveLength(
-      1,
-    );
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
     expect(await tableRows(t, "demoCommands")).toHaveLength(1);
     expect((await getControl(t)).dayCount).toBe(1);
   });
@@ -641,84 +641,91 @@ describe("runner authentication and atomic claims", () => {
     };
 
     const protectedWrites = [
-      () => t.mutation(markResetApplied, {
-        runnerToken: wrongToken,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        expectedStateVersion: ready.commandStateVersion,
-      }),
-      () => t.mutation(markFailureConfirmed, {
-        runnerToken: wrongToken,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        expectedStateVersion: ready.commandStateVersion,
-      }),
-      () => t.mutation(createIncidentFromConfirmedFailure, {
-        runnerToken: wrongToken,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        expectedCommandStateVersion: ready.commandStateVersion,
-        initialHealth: "failed",
-      }),
-      () => t.mutation(appendStep, {
-        runnerToken: wrongToken,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        incidentId: ready.incident.incidentId,
-        expectedCommandStateVersion: ready.commandStateVersion,
-        expectedIncidentStateVersion: ready.incidentStateVersion,
-        stepNonce: "blocked-step",
-        role: "investigator",
-        kind: "evidence",
-        status: "succeeded",
-        sanitizedOutput: "must not be stored",
-        startedAt: BASE_TIME,
-      }),
-      () => t.mutation(createRecoveryCommand, {
-        runnerToken: wrongToken,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        incidentId: ready.incident.incidentId,
-        expectedCommandStateVersion: ready.commandStateVersion,
-        expectedIncidentPhase: "policy_check",
-        expectedIncidentStateVersion: ready.incidentStateVersion,
-        actionId: "restart_demo_service",
-        executionNonce: "blocked-execution",
-      }),
-      () => t.mutation(updateIncidentPhase, {
-        runnerToken: wrongToken,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        incidentId: ready.incident.incidentId,
-        expectedPhase: "policy_check",
-        nextPhase: "executing",
-        expectedStateVersion: ready.incidentStateVersion,
-        expectedCommandStateVersion: ready.commandStateVersion,
-        recoveryCommandId: recovery.recoveryCommandId,
-        expectedRecoveryStateVersion: recovery.stateVersion,
-        executionNonce: "authorized-fixture-execution",
-      }),
-      () => t.mutation(completeIncident, {
-        runnerToken: wrongToken,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        incidentId: ready.incident.incidentId,
-        recoveryCommandId: recovery.recoveryCommandId,
-        executionNonce: "authorized-fixture-execution",
-        expectedPhase: "verifying",
-        expectedIncidentStateVersion: ready.incidentStateVersion,
-        expectedCommandStateVersion: ready.commandStateVersion,
-        expectedRecoveryStateVersion: recovery.stateVersion,
-        terminalState: "resolved",
-        finalHealth: "healthy",
-        verification: {
-          service: "gx-autodevops-demo-service",
-          status: "healthy",
-          httpStatus: 200,
-          requestStartedAt: BASE_TIME + 1_000,
-          checkedAt: BASE_TIME + 1_001,
-        },
-      }),
+      () =>
+        t.mutation(markResetApplied, {
+          runnerToken: wrongToken,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          expectedStateVersion: ready.commandStateVersion,
+        }),
+      () =>
+        t.mutation(markFailureConfirmed, {
+          runnerToken: wrongToken,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          expectedStateVersion: ready.commandStateVersion,
+        }),
+      () =>
+        t.mutation(createIncidentFromConfirmedFailure, {
+          runnerToken: wrongToken,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          expectedCommandStateVersion: ready.commandStateVersion,
+          initialHealth: "failed",
+        }),
+      () =>
+        t.mutation(appendStep, {
+          runnerToken: wrongToken,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          incidentId: ready.incident.incidentId,
+          expectedCommandStateVersion: ready.commandStateVersion,
+          expectedIncidentStateVersion: ready.incidentStateVersion,
+          stepNonce: "blocked-step",
+          role: "investigator",
+          kind: "evidence",
+          status: "succeeded",
+          sanitizedOutput: "must not be stored",
+          startedAt: BASE_TIME,
+        }),
+      () =>
+        t.mutation(createRecoveryCommand, {
+          runnerToken: wrongToken,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          incidentId: ready.incident.incidentId,
+          expectedCommandStateVersion: ready.commandStateVersion,
+          expectedIncidentPhase: "policy_check",
+          expectedIncidentStateVersion: ready.incidentStateVersion,
+          actionId: "restart_demo_service",
+          executionNonce: "blocked-execution",
+        }),
+      () =>
+        t.mutation(updateIncidentPhase, {
+          runnerToken: wrongToken,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          incidentId: ready.incident.incidentId,
+          expectedPhase: "policy_check",
+          nextPhase: "executing",
+          expectedStateVersion: ready.incidentStateVersion,
+          expectedCommandStateVersion: ready.commandStateVersion,
+          recoveryCommandId: recovery.recoveryCommandId,
+          expectedRecoveryStateVersion: recovery.stateVersion,
+          executionNonce: "authorized-fixture-execution",
+        }),
+      () =>
+        t.mutation(completeIncident, {
+          runnerToken: wrongToken,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          incidentId: ready.incident.incidentId,
+          recoveryCommandId: recovery.recoveryCommandId,
+          executionNonce: "authorized-fixture-execution",
+          expectedPhase: "verifying",
+          expectedIncidentStateVersion: ready.incidentStateVersion,
+          expectedCommandStateVersion: ready.commandStateVersion,
+          expectedRecoveryStateVersion: recovery.stateVersion,
+          terminalState: "resolved",
+          finalHealth: "healthy",
+          verification: {
+            service: "gx-autodevops-demo-service",
+            status: "healthy",
+            httpStatus: 200,
+            requestStartedAt: BASE_TIME + 1_000,
+            checkedAt: BASE_TIME + 1_001,
+          },
+        }),
     ];
 
     for (const operation of protectedWrites) {
@@ -754,12 +761,12 @@ describe("runner authentication and atomic claims", () => {
       }),
     ]);
 
-    expect(claims.filter((result) => result.status === "fulfilled")).toHaveLength(
-      1,
-    );
-    expect(claims.filter((result) => result.status === "rejected")).toHaveLength(
-      1,
-    );
+    expect(
+      claims.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      claims.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
     expect(await tableRows(t, "demoCommands")).toEqual([
       expect.objectContaining({
         _id: demoCommandId,
@@ -1325,9 +1332,9 @@ describe("incident creation and ordered trace", () => {
 
     const rows = await tableRows(t, "steps");
     expect(rows).toHaveLength(3);
-    expect(rows.map((row) => row.sequence).sort((a, b) => Number(a) - Number(b))).toEqual([
-      1, 2, 3,
-    ]);
+    expect(
+      rows.map((row) => row.sequence).sort((a, b) => Number(a) - Number(b)),
+    ).toEqual([1, 2, 3]);
   });
 
   it("uses a stable step nonce so a replay creates no second logical step", async () => {
@@ -1647,34 +1654,37 @@ describe("recovery state and completion", () => {
       name: "no-action diagnosis",
       patch: { proposedActionId: "no_action" },
     },
-  ])("denies recovery for $name without writing an action", async ({ patch }) => {
-    const t = createHarness();
-    const ready = await moveIncidentToPolicyCheck(t);
-    await t.run(async (ctx) => {
-      await ctx.db.patch(ready.incident.incidentId as never, patch as never);
-    });
-    const commandBefore = await tableRows(t, "demoCommands");
-    const incidentBefore = await tableRows(t, "incidents");
+  ])(
+    "denies recovery for $name without writing an action",
+    async ({ patch }) => {
+      const t = createHarness();
+      const ready = await moveIncidentToPolicyCheck(t);
+      await t.run(async (ctx) => {
+        await ctx.db.patch(ready.incident.incidentId as never, patch as never);
+      });
+      const commandBefore = await tableRows(t, "demoCommands");
+      const incidentBefore = await tableRows(t, "incidents");
 
-    await expectErrorCode(
-      t.mutation(createRecoveryCommand, {
-        runnerToken: RUNNER_TOKEN,
-        runnerId: RUNNER_ID,
-        demoCommandId: ready.demoCommandId,
-        incidentId: ready.incident.incidentId,
-        expectedCommandStateVersion: ready.commandStateVersion,
-        expectedIncidentPhase: "policy_check",
-        expectedIncidentStateVersion: ready.incidentStateVersion,
-        actionId: "restart_demo_service",
-        executionNonce: `policy-denied-${patch.confidence ?? patch.proposedActionId ?? "missing"}`,
-      }),
-      "POLICY_DENIED",
-    );
+      await expectErrorCode(
+        t.mutation(createRecoveryCommand, {
+          runnerToken: RUNNER_TOKEN,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          incidentId: ready.incident.incidentId,
+          expectedCommandStateVersion: ready.commandStateVersion,
+          expectedIncidentPhase: "policy_check",
+          expectedIncidentStateVersion: ready.incidentStateVersion,
+          actionId: "restart_demo_service",
+          executionNonce: `policy-denied-${patch.confidence ?? patch.proposedActionId ?? "missing"}`,
+        }),
+        "POLICY_DENIED",
+      );
 
-    expect(await tableRows(t, "recoveryCommands")).toHaveLength(0);
-    expect(await tableRows(t, "demoCommands")).toEqual(commandBefore);
-    expect(await tableRows(t, "incidents")).toEqual(incidentBefore);
-  });
+      expect(await tableRows(t, "recoveryCommands")).toHaveLength(0);
+      expect(await tableRows(t, "demoCommands")).toEqual(commandBefore);
+      expect(await tableRows(t, "incidents")).toEqual(incidentBefore);
+    },
+  );
 
   it("validates the command version before creating a recovery", async () => {
     const t = createHarness();
@@ -1823,10 +1833,7 @@ describe("recovery state and completion", () => {
 
   it("cannot close verifying while omitting its executed recovery", async () => {
     const t = createHarness();
-    const ready = await moveRecoveryToVerifying(
-      t,
-      "linked-verifying-recovery",
-    );
+    const ready = await moveRecoveryToVerifying(t, "linked-verifying-recovery");
     const before = await authoritativeSnapshot(t);
 
     await expectErrorCode(
@@ -2193,11 +2200,34 @@ describe("recovery state and completion", () => {
       }),
     ]);
     expect(await tableRows(t, "demoCommands")).toEqual([
-      expect.objectContaining({ status: "complete", finishedAt: expect.any(Number) }),
+      expect.objectContaining({
+        status: "complete",
+        finishedAt: expect.any(Number),
+      }),
     ]);
     const completedControl = await getControl(t);
     expect(completedControl).not.toHaveProperty("activeDemoCommandId");
     expect(completedControl).not.toHaveProperty("activeIncidentId");
+
+    const immediatePublicState = (await t.query(getPublicState, {
+      demoCommandId: ready.demoCommandId,
+    })) as {
+      active: boolean;
+      demoCommandId: string | null;
+      commandStatus: string | null;
+      incident: { currentPhase: string; finalHealth: string | null } | null;
+      result: { finalHealth: string | null } | null;
+    };
+    expect(immediatePublicState).toMatchObject({
+      active: false,
+      demoCommandId: ready.demoCommandId,
+      commandStatus: "complete",
+      incident: {
+        currentPhase: "resolved",
+        finalHealth: "healthy",
+      },
+      result: { finalHealth: "healthy" },
+    });
 
     await expectErrorCode(
       t.mutation(updateIncidentPhase, {
@@ -2219,6 +2249,102 @@ describe("recovery state and completion", () => {
 });
 
 describe("redacted public state", () => {
+  it("keeps a claimed run active after only its queue expiry has passed", async () => {
+    const t = createHarness();
+    const claimedCommandId = await t.run(async (ctx) => {
+      return await ctx.db.insert("demoCommands", {
+        kind: "RESET_DEMO_V1",
+        status: "claimed",
+        createdAt: BASE_TIME,
+        expiresAt: BASE_TIME + 90_000,
+        claimedAt: BASE_TIME + 1_000,
+        runnerId: RUNNER_ID,
+        claimNonce: "claimed-past-queue-expiry",
+        leaseExpiresAt: BASE_TIME + 130_000,
+        stateVersion: 1,
+        idempotencyKey: "claimed-past-queue-expiry",
+      });
+    });
+    vi.setSystemTime(BASE_TIME + 100_000);
+
+    const exactClaimedState = (await t.query(getPublicState, {
+      demoCommandId: claimedCommandId,
+    })) as {
+      active: boolean;
+      commandStatus: string | null;
+    };
+    expect(exactClaimedState).toMatchObject({
+      active: true,
+      commandStatus: "claimed",
+    });
+  });
+
+  it("keeps an exact failed command separate from an older resolved incident", async () => {
+    const t = createHarness();
+    const { previousCommandId, failedCommandId } = await t.run(async (ctx) => {
+      const previousCommandId = await ctx.db.insert("demoCommands", {
+        kind: "RESET_DEMO_V1",
+        status: "complete",
+        createdAt: BASE_TIME,
+        expiresAt: BASE_TIME + 90_000,
+        finishedAt: BASE_TIME + 12_000,
+        stateVersion: 1,
+        idempotencyKey: "previous-complete-command",
+      });
+      await ctx.db.insert("incidents", {
+        demoCommandId: previousCommandId,
+        runId: "previous-resolved-run",
+        staged: true,
+        runnerId: RUNNER_ID,
+        workloadId: "demo-service",
+        currentPhase: "resolved",
+        initialHealth: "failed",
+        finalHealth: "healthy",
+        startedAt: BASE_TIME,
+        finishedAt: BASE_TIME + 12_000,
+        totalLatencyMs: 12_000,
+        costStatus: "not_reported",
+        stateVersion: 1,
+      });
+      const failedCommandId = await ctx.db.insert("demoCommands", {
+        kind: "RESET_DEMO_V1",
+        status: "failed",
+        createdAt: BASE_TIME + 20_000,
+        expiresAt: BASE_TIME + 110_000,
+        finishedAt: BASE_TIME + 21_000,
+        stateVersion: 1,
+        idempotencyKey: "new-failed-command",
+      });
+      return { previousCommandId, failedCommandId };
+    });
+
+    const latestState = (await t.query(getPublicState, {})) as {
+      demoCommandId: string | null;
+      incident: { currentPhase: string } | null;
+    };
+    expect(latestState).toMatchObject({
+      demoCommandId: previousCommandId,
+      incident: { currentPhase: "resolved" },
+    });
+
+    const exactFailedState = (await t.query(getPublicState, {
+      demoCommandId: failedCommandId,
+    })) as {
+      active: boolean;
+      demoCommandId: string | null;
+      commandStatus: string | null;
+      incident: { currentPhase: string } | null;
+    };
+    expect(exactFailedState).toEqual(
+      expect.objectContaining({
+        active: false,
+        demoCommandId: failedCommandId,
+        commandStatus: "failed",
+        incident: null,
+      }),
+    );
+  });
+
   it("shows no prior incident or steps while a fresh command is active", async () => {
     const t = createHarness();
     const prior = await moveIncidentToInvestigating(t);
