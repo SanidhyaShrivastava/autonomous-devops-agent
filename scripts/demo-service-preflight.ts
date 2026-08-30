@@ -1,3 +1,10 @@
+import { spawnSync } from "node:child_process";
+import { resolve } from "node:path";
+
+import { ConvexHttpClient } from "convex/browser";
+import { config as loadEnvironment } from "dotenv";
+
+import { api } from "../convex/_generated/api";
 import {
   DEMO_CONTAINER_NAME,
   DEMO_EXPECTED_SERVICE,
@@ -6,10 +13,88 @@ import {
 } from "../runner/config";
 import { DockerAdapter } from "../runner/docker-adapter";
 
+const NETWORK_TIMEOUT_MS = 10_000;
+const PUBLIC_APP_MARKER =
+  "An AI operations agent that investigates a failed Linux service, performs one approved recovery action, and verifies the result.";
+
+function requiredEnvironment(name: "CONVEX_URL" | "PUBLIC_APP_URL") {
+  const value = process.env[name]?.trim();
+  if (!value) {
+    throw new Error(`${name} is required`);
+  }
+  return value;
+}
+
+function requireSafeUrl(rawUrl: string, name: string) {
+  let parsedUrl: URL;
+  try {
+    parsedUrl = new URL(rawUrl);
+  } catch {
+    throw new Error(`${name} is not a valid URL`);
+  }
+  if (
+    parsedUrl.protocol !== "https:" ||
+    parsedUrl.username ||
+    parsedUrl.password
+  ) {
+    throw new Error(`${name} must be a credential-free HTTPS URL`);
+  }
+  return parsedUrl.origin;
+}
+
+function verifyCodexLogin() {
+  const result = spawnSync("codex", ["login", "status"], {
+    encoding: "utf8",
+    shell: false,
+    timeout: NETWORK_TIMEOUT_MS,
+  });
+  const statusOutput = `${result.stdout ?? ""}\n${result.stderr ?? ""}`;
+  if (
+    result.error ||
+    result.status !== 0 ||
+    !statusOutput.includes("Logged in using ChatGPT")
+  ) {
+    throw new Error("Preflight failed: Codex ChatGPT login is unavailable.");
+  }
+}
+
+async function verifyPublicApp(publicAppOrigin: string) {
+  try {
+    const response = await fetch(publicAppOrigin, {
+      redirect: "error",
+      signal: AbortSignal.timeout(NETWORK_TIMEOUT_MS),
+    });
+    const contentType = response.headers.get("content-type") ?? "";
+    const body = await response.text();
+    if (
+      !response.ok ||
+      !contentType.includes("text/html") ||
+      !body.includes(PUBLIC_APP_MARKER)
+    ) {
+      throw new Error("unexpected public app response");
+    }
+  } catch {
+    throw new Error("Preflight failed: the public app is not reachable.");
+  }
+}
+
 async function main(): Promise<void> {
+  verifyCodexLogin();
+
+  loadEnvironment({
+    path: [resolve(".env.runner.local"), resolve(".env.local")],
+    quiet: true,
+  });
+
   const adapter = new DockerAdapter();
-  const state = await adapter.inspectSafeState();
-  const health = await adapter.checkHealthOnce();
+  let state: Awaited<ReturnType<DockerAdapter["inspectSafeState"]>>;
+  let health: Awaited<ReturnType<DockerAdapter["checkHealthOnce"]>>;
+  try {
+    state = await adapter.inspectSafeState();
+    health = await adapter.checkHealthOnce();
+  } catch {
+    throw new Error("Preflight failed: Docker or the demo service is unavailable.");
+  }
 
   if (
     state.demoLabel !== DEMO_LABEL_VALUE ||
@@ -19,18 +104,45 @@ async function main(): Promise<void> {
     health.service !== DEMO_EXPECTED_SERVICE ||
     health.status !== DEMO_EXPECTED_STATUS
   ) {
-    throw new Error("The fixed disposable demo service is not ready");
+    throw new Error("Preflight failed: the disposable demo service is not ready.");
   }
 
-  console.log(
-    JSON.stringify({
-      container: DEMO_CONTAINER_NAME,
-      docker: "available",
-      health: "healthy",
-      label: "verified",
-      status: state.status,
-    }),
+  const convexOrigin = requireSafeUrl(
+    requiredEnvironment("CONVEX_URL"),
+    "CONVEX_URL",
   );
+  const publicAppOrigin = requireSafeUrl(
+    requiredEnvironment("PUBLIC_APP_URL"),
+    "PUBLIC_APP_URL",
+  );
+  const convex = new ConvexHttpClient(convexOrigin);
+  const publicState = await (async () => {
+    try {
+      return await convex.query(api.demo.getPublicState, {});
+    } catch {
+      throw new Error("Preflight failed: Convex production is not reachable.");
+    }
+  })();
+  if (!publicState.enabled) {
+    throw new Error("Preflight failed: the production demo is disabled.");
+  }
+  if (
+    !publicState.runnerOnline ||
+    publicState.runnerHeartbeatAt === null ||
+    !Number.isFinite(publicState.runnerHeartbeatAt)
+  ) {
+    throw new Error("Preflight failed: the runner heartbeat is stale.");
+  }
+
+  await verifyPublicApp(publicAppOrigin);
+
+  console.log("Docker: ready");
+  console.log(`Container (${DEMO_CONTAINER_NAME}): ready`);
+  console.log("Health: healthy");
+  console.log("Codex login: ChatGPT");
+  console.log("Convex production: reachable");
+  console.log("Runner heartbeat: fresh");
+  console.log("Public app: reachable");
 }
 
 main().catch((error: unknown) => {

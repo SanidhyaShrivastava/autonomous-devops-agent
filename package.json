@@ -15,7 +15,8 @@
     "demo:build": "docker buildx build --pull --load --tag gx-autodevops-demo-service:m0 ./demo-service",
     "demo:start": "tsx scripts/demo-service-start.ts",
     "demo:preflight": "tsx scripts/demo-service-preflight.ts",
-    "demo:proof": "tsx scripts/m0-runner-proof.ts"
+    "demo:proof": "tsx scripts/m0-runner-proof.ts",
+    "eval": "tsx scripts/run-evals.ts"
   },
   "dependencies": {
     "convex": "^1.45.0",

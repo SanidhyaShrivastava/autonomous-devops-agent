@@ -9,3 +9,4 @@
 - The controlled runner can now save and safely resume one bounded recovery run in Convex, while visitors can read only a redacted trace that clearly labels the run as staged.
 - A recovery run can now turn bounded failed-health, container-state, and sanitized-log evidence into one strict diagnosis while keeping ChatGPT auth, host files, and executable authority outside the model's reach.
 - A visitor can now inspect live runner status, recovery evidence, and measured verification results on one responsive screen.
+- A visitor can now trigger one disposable Linux-service failure and watch the agent investigate, restart, independently verify, and persist the real recovery trace.

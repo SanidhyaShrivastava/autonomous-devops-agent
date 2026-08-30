@@ -3,8 +3,24 @@
 A GrowthX Build Week project proving a bounded operational recovery loop: detect a failed Linux workload, investigate it, execute one permitted recovery action, and independently verify health.
 
 - Public app: https://autonomous-devops-agent.vercel.app
-- Status: the complete M1 recovery loop is configured for production; the first public evidence run is tracked in Task 9.
+- Status: the complete M1 recovery loop is live and verified by three logged-out public runs, including one fresh independent review.
 - Surface: Sanidhya-owned disposable Docker container only. Current evidence is controlled/staged and cannot support an L4 or L5 real-output claim.
+
+## Verified M1 evidence
+
+On Sun 30 Aug 2026, three separate public `Reset demo` runs completed without terminal assistance after the click:
+
+| Run | Result | Steps | Recovery time | Model usage | Human action |
+|---|---|---:|---:|---|---|
+| 1 | `FAILED → HEALTHY` | 9 | 12.7s | 7,980 input / 93 output tokens | None |
+| 2 | `FAILED → HEALTHY` | 9 | 11.6s | 8,146 input / 97 output tokens | None |
+| 3 — independent review | `FAILED → HEALTHY` | 9 | 11.8s | 8,201 input / 92 output tokens | None |
+
+- `OUTPUT-L3`: the controlled Docker service was really stopped, failed its health check, received only the fixed allowlisted restart, and passed a fresh independent HTTP health check. Evidence: [resolution card](output/playwright/output-l3-resolution.png). This is explicitly staged/test output, so the honest rubric level is **Working product shipping real output L3**.
+- `OBS-L3`: incident `jd7bxw8ahczeaj9cxx548cpaz18denet` restored after a full page reload with nine ordered steps across Incident Manager, Investigator, Policy Gate, Executor, and Verifier. Each step shows status, sanitized output, and latency; the Investigator step also shows tokens. Evidence: [persisted timeline](output/playwright/observability-l3-timeline.png). Cost is unavailable under ChatGPT subscription login and there are no run filters, so the honest rubric level is **Observability L3**, not L4.
+- Phone check: the deployed page rendered at 390×844 with no horizontal overflow and zero browser errors. Evidence: [phone viewport](output/playwright/recovery-loop-phone.png).
+- Synthetic/control evaluation: `npm run eval` reports **7 PASS, 3 SKIPPED_M1, 0 FAIL** for `recovery-loop-v1`. The skipped scheduled-job and cross-run-memory cases are not presented as implemented.
+- Fresh independent review: **PASS, no blockers**. It separately verified one empty-body public request, duplicate/offline/failed-verification controls, reload persistence, desktop and phone widths, 257/257 tests, and zero browser errors or warnings. Three non-blocking UI nits are parked for user evidence: a brief early outcome placeholder, the long phone trace, and no visible stable incident ID.
 
 ## Current safety boundary
 
@@ -30,6 +46,7 @@ npm run typecheck
 npm run lint
 npm run demo:build
 npm run demo:proof
+npm run eval
 npm run build
 ```
 
@@ -66,13 +83,19 @@ The public web app and Convex run in the cloud. Docker, Codex authentication, an
 With Docker Desktop running:
 
 ```bash
+# Terminal 1
 npm run demo:start
-npm run demo:preflight
+
+# Terminal 2 — leave this running
 npm run runner
+
+# Back in Terminal 1
+npm run demo:preflight
 ```
 
 - `demo:start` creates or starts only the fixed, labelled disposable container and checks its health.
-- `demo:preflight` reads only the fixed container's safe status and health.
-- `runner` connects the fixed local workload to Convex and waits for one bounded reset request.
+- Start `runner` in a separate terminal and leave it open; it connects the fixed local workload to Convex and waits for one bounded reset request.
+- Run `demo:preflight` in the original terminal after the runner connects. It reports status only and verifies Docker, the exact container and health response, ChatGPT-based Codex login, Convex production, a fresh runner heartbeat, and the public app.
+- `eval` runs synthetic/control safety checks only; it never touches Docker or production.
 
 Closing the runner or Docker correctly makes the public page show `Runner offline`; the page never substitutes a fake recovery run.

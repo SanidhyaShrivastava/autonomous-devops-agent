@@ -13,7 +13,10 @@
 # testing
 /coverage
 /.playwright-cli/
-/output/playwright/
+/output/playwright/*
+!/output/playwright/observability-l3-timeline.png
+!/output/playwright/output-l3-resolution.png
+!/output/playwright/recovery-loop-phone.png
 
 # next.js
 /.next/
