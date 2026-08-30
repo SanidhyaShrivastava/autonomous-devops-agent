@@ -2,8 +2,8 @@
 
 A GrowthX Build Week project proving a bounded operational recovery loop: detect a failed Linux workload, investigate it, execute one permitted recovery action, and independently verify health.
 
-- Public setup page: https://autonomous-devops-agent.vercel.app
-- Status: M0 runner feasibility is verified locally; the complete public recovery loop is not built yet.
+- Public app: https://autonomous-devops-agent.vercel.app
+- Status: the complete M1 recovery loop is configured for production; the first public evidence run is tracked in Task 9.
 - Surface: Sanidhya-owned disposable Docker container only. Current evidence is controlled/staged and cannot support an L4 or L5 real-output claim.
 
 ## Current safety boundary
@@ -19,7 +19,7 @@ A GrowthX Build Week project proving a bounded operational recovery loop: detect
 - No employer systems, customer systems, production data, host mounts, credentials, or arbitrary shell commands are used.
 - Any future real-user environment remains approval-first until action-level trust is validated.
 
-## Verify the M0 runner proof
+## Local verification
 
 Docker Desktop must be running. These commands build and exercise only the fixed disposable container:
 
@@ -36,3 +36,43 @@ npm run build
 `npm run demo:proof` performs one controlled stop and one fixed restart, checks that unknown and duplicate actions are rejected, and prints a non-sensitive JSON result. It leaves the disposable service running and healthy.
 
 Do not copy Codex or account authentication files into this repository, Docker, Vercel, or Convex.
+
+## Production configuration
+
+Production deploys use the GitHub-connected Vercel project and the build command in `vercel.json`. That command deploys the Convex functions first, supplies the matching production Convex URL to the Next.js build, and then builds the web app.
+
+Keep every value in only the places listed here:
+
+| Variable | Convex production | Vercel production | `.env.runner.local` |
+|---|---:|---:|---:|
+| `DEMO_REQUEST_SECRET` | Yes | Yes | No |
+| `RUNNER_TOKEN` | Yes | No | Yes |
+| `CONVEX_DEPLOY_KEY` | No | Yes | No |
+| `CONVEX_URL` | No | Yes | Yes |
+| `PUBLIC_APP_URL` | No | Yes | Yes |
+| `RUNNER_ID` | No | No | Yes |
+
+- Generate different random 32-byte values for `DEMO_REQUEST_SECRET` and `RUNNER_TOKEN`.
+- `DEMO_REQUEST_SECRET` must be identical in Convex and Vercel.
+- `RUNNER_TOKEN` must be identical in Convex and `.env.runner.local`.
+- `CONVEX_DEPLOY_KEY` must be a production Convex deployment key with deployment permission.
+- Never prefix a secret with `NEXT_PUBLIC_`; values with that prefix can be sent to the browser.
+- Never commit `.env.runner.local`; `.env*` is ignored except for the empty `.env.example` template.
+
+## Start the trusted local pieces
+
+The public web app and Convex run in the cloud. Docker, Codex authentication, and the privileged runner stay on Sanidhya's Mac.
+
+With Docker Desktop running:
+
+```bash
+npm run demo:start
+npm run demo:preflight
+npm run runner
+```
+
+- `demo:start` creates or starts only the fixed, labelled disposable container and checks its health.
+- `demo:preflight` reads only the fixed container's safe status and health.
+- `runner` connects the fixed local workload to Convex and waits for one bounded reset request.
+
+Closing the runner or Docker correctly makes the public page show `Runner offline`; the page never substitutes a fake recovery run.
