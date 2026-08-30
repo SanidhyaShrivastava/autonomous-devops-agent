@@ -33,11 +33,11 @@
 - Test: `tests/convex-state.test.ts`
 
 **Interfaces:**
-- Produces constants `RUNNER_HEARTBEAT_INTERVAL_MS`, `RUNNER_LOST_AFTER_MS`, `STEP_DEADLINE_MS`, and `RUN_DEADLINE_MS`.
+- Uses the runner's `2_000ms` heartbeat interval plus server constants `RUNNER_HEARTBEAT_LOSS_MS`, `ACTIVE_STEP_DEADLINE_MS`, and `ACTIVE_RUN_DEADLINE_MS`.
 - Produces internal mutation `runner.watchActiveRun` and a two-second Convex cron.
 - Persists incident fields `status`, `lastCompletedStepSequence`, `lastCompletedStepLabel`, `environmentRecoveryStatus`, `environmentRecoveryStartedAt`, and `environmentRecoveredAt`.
 
-- [ ] **Step 1: Write failing watchdog tests**
+- [x] **Step 1: Write failing watchdog tests**
 
 ```ts
 expect(failedIncident).toMatchObject({
@@ -52,13 +52,13 @@ expect(failedCommand.status).toBe("failed");
 expect(control).not.toHaveProperty("activeDemoCommandId");
 ```
 
-- [ ] **Step 2: Run the focused tests and confirm they fail before implementation**
+- [x] **Step 2: Run the focused tests and confirm they fail before implementation**
 
 Run: `npm test -- tests/convex-state.test.ts -t "watchdog"`
 
 Expected: FAIL because the server watchdog and persisted failure fields do not exist.
 
-- [ ] **Step 3: Implement one idempotent terminalization helper and the watchdog**
+- [x] **Step 3: Implement one idempotent terminalization helper and the watchdog**
 
 ```ts
 export const watchActiveRun = internalMutation({
@@ -67,9 +67,9 @@ export const watchActiveRun = internalMutation({
 });
 ```
 
-The helper must choose runner loss before step/run deadlines, derive the last completed step from stored rows, insert one failed watchdog step, fail any recovery command, clear active locks, expire the cooldown, and queue environment restoration only if the disposable service may have been stopped.
+The helper chooses runner loss before step/run deadlines, derives the last completed step from stored rows, inserts one failed watchdog step, fails any recovery command, clears active locks, expires the cooldown, and queues an idempotent health-restoration check before another run.
 
-- [ ] **Step 4: Register the independent cloud cron**
+- [x] **Step 4: Register the independent cloud cron**
 
 ```ts
 crons.interval(
@@ -79,7 +79,7 @@ crons.interval(
 );
 ```
 
-- [ ] **Step 5: Run focused tests until the runner-loss, step-deadline, run-deadline, idempotency, and pre-incident lock cases pass**
+- [x] **Step 5: Run focused tests until the runner-loss, step-deadline, run-deadline, idempotency, and pre-incident lock cases pass**
 
 Run: `npm test -- tests/convex-state.test.ts -t "watchdog"`
 
@@ -99,7 +99,7 @@ Run: `npm test -- tests/convex-state.test.ts -t "watchdog"`
 - Runner client exposes `claimEnvironmentRecovery`, `completeEnvironmentRecovery`, and `failEnvironmentRecovery`.
 - `restoreDemoEnvironment(request)` starts only the validated labelled container, performs a fresh exact health check, then persists `restored`.
 
-- [ ] **Step 1: Write failing restoration and heartbeat tests**
+- [x] **Step 1: Write failing restoration and heartbeat tests**
 
 ```ts
 expect(fakeWorkload.ensureDemoService).toHaveBeenCalledOnce();
@@ -109,15 +109,15 @@ expect(fakeClient.completeEnvironmentRecovery).toHaveBeenCalledWith(
 );
 ```
 
-- [ ] **Step 2: Run focused tests and confirm the missing interfaces fail**
+- [x] **Step 2: Run focused tests and confirm the missing interfaces fail**
 
 Run: `npm test -- tests/convex-runner-client.test.ts tests/environment-restorer.test.ts tests/runner-loop.test.ts`
 
-- [ ] **Step 3: Implement fixed restoration mutations and client methods**
+- [x] **Step 3: Implement fixed restoration mutations and client methods**
 
 The server accepts only the fixed runner identity and exact verified health fields: service `gx-autodevops-demo-service`, status `healthy`, and HTTP `200`. Failed restoration stays queued for a bounded retry and does not enable a new run.
 
-- [ ] **Step 4: Change the default heartbeat to two seconds and connect restoration to heartbeat responses**
+- [x] **Step 4: Change the default heartbeat to two seconds and connect restoration to heartbeat responses**
 
 ```ts
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 2_000;
@@ -125,7 +125,7 @@ const DEFAULT_HEARTBEAT_INTERVAL_MS = 2_000;
 
 On a restoration request, abort unfinished orchestration, wait for it to unwind, restore the fixed service once, and report the verified result. On startup, process pending restoration before requiring an idle healthy workload.
 
-- [ ] **Step 5: Run focused tests until kill/reconnect, duplicate cleanup, failed verification, and clean-start cases pass**
+- [x] **Step 5: Run focused tests until kill/reconnect, duplicate cleanup, failed verification, and clean-start cases pass**
 
 Run: `npm test -- tests/convex-runner-client.test.ts tests/environment-restorer.test.ts tests/runner-loop.test.ts`
 
@@ -142,7 +142,7 @@ Run: `npm test -- tests/convex-runner-client.test.ts tests/environment-restorer.
 - `getPublicState` returns the persisted failure status, last completed step, and environment-restoration state for the exact accepted run.
 - The resolution card renders the failed terminal result in the same outcome-first position used by success.
 
-- [ ] **Step 1: Write failing visitor tests**
+- [x] **Step 1: Write failing visitor tests**
 
 ```tsx
 expect(screen.getByText("Step 4 · Read service logs")).toBeInTheDocument();
@@ -152,19 +152,19 @@ expect(
 expect(screen.getByText("Demo environment restored and healthy")).toBeInTheDocument();
 ```
 
-- [ ] **Step 2: Run the focused UI tests and confirm they fail**
+- [x] **Step 2: Run the focused UI tests and confirm they fail**
 
 Run: `npm test -- tests/public-view.test.tsx`
 
-- [ ] **Step 3: Render terminal failure and restoration truthfully**
+- [x] **Step 3: Render terminal failure and restoration truthfully**
 
 Show `Restoration pending until the runner reconnects` before cleanup and `Demo environment restored and healthy` only after exact verified cleanup. Keep the failed incident outcome unchanged after restoration.
 
-- [ ] **Step 4: Keep one-second updates and make the run-button rule complete**
+- [x] **Step 4: Keep one-second updates and make the run-button rule complete**
 
 Disable for active run, offline runner, or pending restoration. Enable when the terminal incident is persisted, the runner heartbeat is fresh, restoration is verified, and no cooldown remains. Expire the failed-run cooldown server-side so a clean retry can start immediately.
 
-- [ ] **Step 5: Re-run public UI tests**
+- [x] **Step 5: Re-run public UI tests**
 
 Run: `npm test -- tests/public-view.test.tsx`
 
@@ -177,30 +177,30 @@ Run: `npm test -- tests/public-view.test.tsx`
 **Interfaces:**
 - Produces one persisted runner-loss incident, one restored environment record, and one fresh nine-step success run.
 
-- [ ] **Step 1: Run all local quality gates**
+- [x] **Step 1: Run all local quality gates**
 
 Run: `npm test && npm run typecheck && npm run lint && npm run build && git diff --check`
 
-- [ ] **Step 2: Kill the runner after step 4 at 1440px**
+- [x] **Step 2: Kill the runner after step 4 at 1440px**
 
 Open the public/local production-connected UI, start a run, wait for `Read the latest 30 log lines`, terminate only the runner process, and measure from the last heartbeat. Require a persisted failed outcome within 15 seconds, exact last-step/reason copy, and a released active lock.
 
-- [ ] **Step 3: Reload and verify persistence**
+- [x] **Step 3: Reload and verify persistence**
 
 Reload while failed. Require the same incident ID, finish timestamp, reason, last completed step, and failed result.
 
-- [ ] **Step 4: Restart the runner and verify automatic restoration**
+- [x] **Step 4: Restart the runner and verify automatic restoration**
 
 Require the runner to claim the fixed cleanup, start the labelled disposable service, verify HTTP 200 with the exact service identity, persist `restored`, and enable the run button.
 
-- [ ] **Step 5: Repeat the runner-loss proof at 390px**
+- [x] **Step 5: Repeat the runner-loss proof at 390px**
 
 Require failure within 15 seconds, 390px document width, resolution record above timeline, raw evidence collapsed, and zero browser errors/warnings.
 
-- [ ] **Step 6: Restart and run the successful path**
+- [x] **Step 6: Restart and run the successful path**
 
 Require a fresh nine-step FAILED → HEALTHY run and confirm headline, button label, allowlisted/policy-checked wording, outcome-first phone order, collapsed evidence, and absence of token/cost/auth metadata.
 
-- [ ] **Step 7: Commit, push, wait for production Vercel/Convex deployment, and repeat the same public checks**
+- [x] **Step 7: Commit, push, wait for production Vercel/Convex deployment, and repeat the same public checks**
 
 The production alias remains `https://autonomous-devops-agent.vercel.app`. Record the commit, Vercel deployment ID, failure timing at both widths, restoration proof, reload proof, and successful retry in `IDEA_SCOPE.md` only after the public run passes.
