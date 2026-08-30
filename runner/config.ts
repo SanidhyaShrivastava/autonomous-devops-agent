@@ -1,12 +1,19 @@
-export const DEMO_CONTAINER_NAME = "gx-autodevops-demo-service" as const;
+import {
+  DEMO_ACTION_ID,
+  DEMO_HEALTHY_STATUS,
+  DEMO_SERVICE_IDENTITY,
+  DEMO_WORKLOAD_ID,
+} from "../src/lib/contracts";
+
+export { DEMO_ACTION_ID, DEMO_WORKLOAD_ID };
+
+export const DEMO_CONTAINER_NAME = DEMO_SERVICE_IDENTITY;
 export const DEMO_LABEL_KEY = "com.growthx.demo" as const;
 export const DEMO_LABEL_VALUE = "autonomous-devops-agent" as const;
 export const DEMO_IMAGE = "gx-autodevops-demo-service:m0" as const;
-export const DEMO_WORKLOAD_ID = "demo-service" as const;
-export const DEMO_ACTION_ID = "restart_demo_service" as const;
 export const DEMO_HEALTH_URL = "http://127.0.0.1:3400/health" as const;
-export const DEMO_EXPECTED_SERVICE = DEMO_CONTAINER_NAME;
-export const DEMO_EXPECTED_STATUS = "healthy" as const;
+export const DEMO_EXPECTED_SERVICE = DEMO_SERVICE_IDENTITY;
+export const DEMO_EXPECTED_STATUS = DEMO_HEALTHY_STATUS;
 
 export const DEMO_LOG_LINE_LIMIT = 30;
 export const PUBLIC_OUTPUT_CHARACTER_LIMIT = 4_000;
