@@ -48,7 +48,7 @@ function publicState(
     runnerOnline: true,
     enabled: true,
     active: false,
-    runnerHeartbeatAt: BASE_TIME,
+    runnerHeartbeatAt: Date.now(),
     cooldownUntil: null,
     cooldownRemainingMs: 0,
     incident: null,
@@ -148,6 +148,77 @@ function resolvedState() {
       reportedOutputTokens: 93,
       costStatus: "unavailable_chatgpt_subscription",
     },
+  });
+}
+
+function runnerLossSteps() {
+  return [
+    step(1, {
+      role: "incident_manager",
+      kind: "reset_applied",
+      safeCommandLabel: "docker stop fixed demo service",
+      sanitizedOutput: '{"resetApplied":true}',
+    }),
+    step(2, {
+      role: "incident_manager",
+      kind: "failure_confirmed",
+      safeCommandLabel: "HTTP GET fixed demo health",
+      sanitizedOutput: '{"healthy":false}',
+    }),
+    step(3, {
+      role: "investigator",
+      kind: "safe_state_collected",
+      safeCommandLabel: "docker inspect fixed demo service",
+      sanitizedOutput: '{"status":"exited"}',
+    }),
+    step(4, {
+      role: "investigator",
+      kind: "safe_logs_collected",
+      safeCommandLabel: "docker logs --tail 30 fixed demo service",
+      sanitizedOutput: "demo-service received SIGTERM",
+    }),
+  ];
+}
+
+function runnerLossState(
+  environmentRecoveryStatus: "pending" | "restored",
+  overrides: Record<string, unknown> = {},
+  incidentOverrides: Record<string, unknown> = {},
+) {
+  const environmentRestored = environmentRecoveryStatus === "restored";
+  return publicState({
+    snapshotAt: BASE_TIME + (environmentRestored ? 10_000 : 8_000),
+    demoCommandId: "command_runner_loss",
+    commandStatus: "failed",
+    commandExpiresAt: BASE_TIME + 90_000,
+    runnerOnline: environmentRestored,
+    runnerHeartbeatAt: environmentRestored ? BASE_TIME + 10_000 : null,
+    active: false,
+    incident: incident("investigation_failed", {
+      status: "failed",
+      finalHealth: "failed",
+      finishedAt: BASE_TIME + 8_000,
+      terminalReason: "runner lost after step 4: read service logs",
+      lastCompletedStepSequence: 4,
+      lastCompletedStepLabel: "read service logs",
+      environmentRecoveryStatus,
+      environmentRecoveryStartedAt: environmentRestored
+        ? BASE_TIME + 9_000
+        : null,
+      environmentRecoveredAt: environmentRestored
+        ? BASE_TIME + 10_000
+        : null,
+      ...incidentOverrides,
+    }),
+    steps: runnerLossSteps(),
+    result: {
+      finalHealth: "failed",
+      totalLatencyMs: 8_000,
+      reportedInputTokens: null,
+      reportedOutputTokens: null,
+      costStatus: "not_reported",
+    },
+    ...overrides,
   });
 }
 
@@ -364,6 +435,76 @@ describe("public recovery dashboard", () => {
     expect(convexHttpMock.query).toHaveBeenCalledTimes(callsAtTerminalState);
   });
 
+  it("refreshes the exact accepted run once per second into persisted runner loss and then stops", async () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIME);
+    const previousResolvedState = resolvedState();
+    convexMock.useQuery.mockImplementation((_query, args) =>
+      args === "skip" || (typeof args === "object" && "demoCommandId" in args)
+        ? undefined
+        : previousResolvedState,
+    );
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ demoCommandId: "command_runner_loss" }), {
+        status: 202,
+      }),
+    );
+    convexHttpMock.query
+      .mockResolvedValueOnce(
+        publicState({
+          snapshotAt: BASE_TIME + 1_000,
+          demoCommandId: "command_runner_loss",
+          commandStatus: "failure_confirmed",
+          commandExpiresAt: BASE_TIME + 90_000,
+          active: true,
+          incident: incident("investigating"),
+          steps: runnerLossSteps(),
+        }),
+      )
+      .mockResolvedValueOnce(
+        runnerLossState("pending", {
+          snapshotAt: BASE_TIME + 2_000,
+          runnerOnline: false,
+          runnerHeartbeatAt: null,
+        }),
+      );
+
+    render(<DemoDashboard />);
+    await act(async () => {
+      fireEvent.click(
+        screen.getByRole("button", { name: "Run recovery demo" }),
+      );
+      await Promise.resolve();
+    });
+    expect(screen.queryByText("12.4s")).not.toBeInTheDocument();
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Investigating evidence");
+    expect(convexHttpMock.query).toHaveBeenLastCalledWith(expect.anything(), {
+      demoCommandId: "command_runner_loss",
+    });
+
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(1_000);
+    });
+    const callsAtRunnerLoss = convexHttpMock.query.mock.calls.length;
+    await act(async () => {
+      await vi.advanceTimersByTimeAsync(5_000);
+    });
+    expect(convexHttpMock.query).toHaveBeenCalledTimes(callsAtRunnerLoss);
+    expect(screen.queryByText("Recovered successfully")).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Runner lost after step 4: read service logs"),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Restoration pending until the runner reconnects"),
+    ).toBeInTheDocument();
+  });
+
   it("reports an accepted reset honestly when its response body is unreadable", async () => {
     convexMock.useQuery.mockReturnValue(publicState());
     vi.mocked(fetch).mockResolvedValue(
@@ -467,7 +608,7 @@ describe("public recovery dashboard", () => {
     render(<DemoDashboard />);
     act(() => vi.advanceTimersByTime(2_000));
     const callsAtExpiry = convexMock.useQuery.mock.calls.length;
-    act(() => vi.advanceTimersByTime(5_000));
+    act(() => vi.advanceTimersByTime(1_500));
 
     expect(convexMock.useQuery).toHaveBeenCalledTimes(callsAtExpiry);
     expect(
@@ -495,6 +636,159 @@ describe("public recovery dashboard", () => {
     ).toBeDisabled();
   });
 
+  it("renders persisted runner loss in the resolution location while restoration is pending", () => {
+    convexMock.useQuery.mockReturnValue(runnerLossState("pending"));
+
+    render(<DemoDashboard />);
+
+    const resolutionHeading = screen.getByRole("heading", {
+      name: "Resolution record",
+    });
+    const resolutionPanel = resolutionHeading.closest("aside");
+    const timelineHeading = screen.getByRole("heading", {
+      name: "Incident timeline",
+    });
+    const lastStep = screen.queryByText("Step 4 · Read service logs");
+    const reason = screen.queryByText(
+      "Runner lost after step 4: read service logs",
+    );
+    const pending = screen.queryByText(
+      "Restoration pending until the runner reconnects",
+    );
+
+    expect(resolutionPanel).not.toBeNull();
+    expect(resolutionPanel?.querySelector(".outcome-banner-danger")).not.toBeNull();
+    expect(lastStep).toBeInTheDocument();
+    expect(reason).toBeInTheDocument();
+    expect(pending).toBeInTheDocument();
+    expect(resolutionPanel).toContainElement(lastStep);
+    expect(resolutionPanel).toContainElement(reason);
+    expect(resolutionPanel).toContainElement(pending);
+    expect(
+      screen.queryByText("Demo environment restored and healthy"),
+    ).not.toBeInTheDocument();
+    expect(
+      resolutionHeading.compareDocumentPosition(timelineHeading) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      screen.getByRole("button", { name: "Run recovery demo" }),
+    ).toBeDisabled();
+  });
+
+  it("explains a failed restoration attempt without blaming a disconnected runner", () => {
+    convexMock.useQuery.mockReturnValue(
+      runnerLossState(
+        "pending",
+        {},
+        {
+          environmentRecoveryError:
+            "Demo environment restoration failed; retry required.",
+        },
+      ),
+    );
+
+    render(<DemoDashboard />);
+
+    expect(
+      screen.getByText(
+        "The last restoration attempt failed. The runner will retry automatically.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("Restoration pending until the runner reconnects"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("keeps reset disabled until the runner is online and restoration is verified", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIME);
+    let currentState = runnerLossState("pending", {
+      runnerOnline: false,
+      runnerHeartbeatAt: null,
+    });
+    convexMock.useQuery.mockImplementation(() => currentState);
+
+    const view = render(<DemoDashboard />);
+    const button = screen.getByRole("button", { name: "Run recovery demo" });
+    expect(button).toBeDisabled();
+    expect(screen.getByText("Service unavailable")).toHaveClass(
+      "badge-neutral",
+    );
+
+    currentState = runnerLossState("pending", {
+      snapshotAt: BASE_TIME + 9_000,
+      runnerOnline: true,
+      runnerHeartbeatAt: BASE_TIME,
+    });
+    view.rerender(<DemoDashboard />);
+    expect.soft(button).toBeDisabled();
+    expect.soft(
+      screen.queryByText(
+        "Restoration queued; the runner will restore it automatically",
+      ),
+    ).toBeInTheDocument();
+    expect.soft(
+      screen.queryByText("Restoration pending until the runner reconnects"),
+    ).not.toBeInTheDocument();
+    expect.soft(screen.getByText("Service restoring")).toHaveClass(
+      "badge-neutral",
+    );
+
+    currentState = runnerLossState("restored", {
+      runnerOnline: true,
+      runnerHeartbeatAt: BASE_TIME,
+    });
+    view.rerender(<DemoDashboard />);
+    expect.soft(button).toBeEnabled();
+    expect.soft(
+      screen.queryByText("Demo environment restored and healthy"),
+    ).toBeInTheDocument();
+    expect.soft(
+      screen.queryByText("Restoration pending until the runner reconnects"),
+    ).not.toBeInTheDocument();
+    expect
+      .soft(screen.queryByText("Recovered successfully"))
+      .not.toBeInTheDocument();
+    expect.soft(
+      screen.queryByText("Runner lost after step 4: read service logs"),
+    ).toBeInTheDocument();
+    expect.soft(screen.getByText("Service healthy")).toHaveClass(
+      "badge-online",
+    );
+    expect.soft(screen.queryByText("Service unhealthy")).not.toBeInTheDocument();
+  });
+
+  it("marks a restored service unavailable when its runner heartbeat becomes stale", () => {
+    vi.useFakeTimers();
+    vi.setSystemTime(BASE_TIME);
+    convexMock.useQuery.mockReturnValue(
+      runnerLossState("restored", {
+        runnerOnline: true,
+        runnerHeartbeatAt: BASE_TIME,
+      }),
+    );
+
+    render(<DemoDashboard />);
+    expect(screen.getByText("Runner online")).toBeInTheDocument();
+    expect(screen.getByText("Service healthy")).toHaveClass("badge-online");
+
+    act(() => vi.advanceTimersByTime(3_999));
+    expect(screen.getByText("Runner online")).toBeInTheDocument();
+    expect(screen.getByText("Service healthy")).toHaveClass("badge-online");
+
+    act(() => vi.advanceTimersByTime(1));
+
+    expect(screen.getByText("Runner offline")).toBeInTheDocument();
+    expect(screen.getByText("Service unavailable")).toHaveClass(
+      "badge-neutral",
+    );
+    expect(screen.queryByText("Service healthy")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Run recovery demo" }),
+    ).toBeDisabled();
+  });
+
   it("renders a concise resolved trace without public model, cost, or login metadata", () => {
     convexMock.useQuery.mockReturnValue(resolvedState());
 
@@ -516,6 +810,11 @@ describe("public recovery dashboard", () => {
     expect(screen.queryByText("$0")).not.toBeInTheDocument();
     expect(screen.queryByText("$")).not.toBeInTheDocument();
     expect(screen.getAllByText("Operation").length).toBeGreaterThan(0);
+    expect(
+      screen.getByText(
+        "Executed the allowlisted, policy-checked recovery action",
+      ),
+    ).toBeInTheDocument();
     const evidenceControls = screen.getAllByText("View raw evidence");
     expect(evidenceControls.length).toBeGreaterThan(0);
     expect(
@@ -524,6 +823,15 @@ describe("public recovery dashboard", () => {
       ),
     ).toBe(true);
     expect(screen.getByText("Verified healthy")).toHaveClass("rail-healthy");
+    expect(
+      screen.queryByText("Runner lost after step 4: read service logs"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Restoration pending until the runner reconnects"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Demo environment restored and healthy"),
+    ).not.toBeInTheDocument();
 
     const resolution = screen.getByRole("heading", {
       name: "Resolution record",

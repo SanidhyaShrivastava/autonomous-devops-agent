@@ -23,7 +23,7 @@ const PHASE_LABELS: Record<string, string> = {
   investigation_failed: "Investigation failed",
 };
 
-const RUNNER_FRESHNESS_MS = 15_000;
+const RUNNER_FRESHNESS_MS = 4_000;
 const ACTIVE_RUN_REFRESH_MS = 1_000;
 const ACTIVE_RUN_REFRESH_LIMIT_MS = 90_000;
 const TERMINAL_COMMAND_STATUSES = new Set(["complete", "failed", "expired"]);
@@ -54,6 +54,14 @@ function didCommandFailBeforeIncident(state: PublicDemoState | undefined) {
     state?.incident === null &&
     (state.commandStatus === "failed" || state.commandStatus === "expired")
   );
+}
+
+function environmentRecoveryStatus(state: PublicDemoState | undefined) {
+  if (!state?.incident) {
+    return null;
+  }
+
+  return state.incident.environmentRecoveryStatus;
 }
 
 function freshestState(
@@ -158,7 +166,7 @@ function useLiveRunnerOnline(
     const expiresAt = runnerHeartbeatAt + RUNNER_FRESHNESS_MS;
     const timer = window.setTimeout(
       () => setExpiredHeartbeatAt(runnerHeartbeatAt),
-      Math.max(0, expiresAt - Date.now()) + 1,
+      Math.max(0, expiresAt - Date.now()),
     );
 
     return () => window.clearTimeout(timer);
@@ -239,6 +247,11 @@ export function DemoDashboard() {
     state?.runnerOnline ?? false,
     state?.runnerHeartbeatAt,
   );
+  const recoveryStatus = environmentRecoveryStatus(state);
+  const environmentRestorationPending =
+    recoveryStatus !== null &&
+    recoveryStatus !== undefined &&
+    recoveryStatus !== "restored";
   const stateKey = state
     ? `${state.demoCommandId ?? "none"}:${state.active}:${state.incident?.incidentId ?? "none"}:${state.incident?.currentPhase ?? "none"}:${state.steps.length}`
     : "loading";
@@ -318,6 +331,9 @@ export function DemoDashboard() {
   } else if (!runnerOnline) {
     disabledReason =
       "The recovery demo is unavailable because the Linux runner is offline.";
+  } else if (environmentRestorationPending) {
+    disabledReason =
+      "The recovery demo is unavailable until the demo environment is restored.";
   } else if (state.active) {
     disabledReason =
       "The recovery demo is unavailable while an incident is active.";
@@ -373,25 +389,34 @@ export function DemoDashboard() {
     ? "Service unknown"
     : !runnerOnline
       ? "Service unavailable"
-      : state.active
-        ? "Service recovering"
-        : state.result?.finalHealth === "healthy"
-          ? "Service healthy"
-          : state.result?.finalHealth === "failed"
-            ? "Service unhealthy"
-            : "Service ready";
+      : recoveryStatus === "restored"
+        ? "Service healthy"
+        : recoveryStatus === "pending" || recoveryStatus === "restoring"
+          ? "Service restoring"
+          : state.active
+            ? "Service recovering"
+            : state.result?.finalHealth === "healthy"
+              ? "Service healthy"
+              : state.result?.finalHealth === "failed"
+                ? "Service unhealthy"
+                : "Service ready";
   const runnerBadgeClass = !state
     ? "badge-neutral"
     : runnerOnline
       ? "badge-online"
       : "badge-offline";
-  const serviceBadgeClass = !runnerOnline
-    ? "badge-neutral"
-    : state?.result?.finalHealth === "healthy"
-      ? "badge-online"
-      : state?.result?.finalHealth === "failed"
-        ? "badge-offline"
-        : "badge-neutral";
+  const serviceBadgeClass =
+    !runnerOnline
+      ? "badge-neutral"
+      : recoveryStatus === "restored"
+        ? "badge-online"
+        : recoveryStatus === "pending" || recoveryStatus === "restoring"
+          ? "badge-neutral"
+          : state?.result?.finalHealth === "healthy"
+            ? "badge-online"
+            : state?.result?.finalHealth === "failed"
+              ? "badge-offline"
+              : "badge-neutral";
   const phaseDetail = !state
     ? "Connecting to the public incident state"
     : !state.enabled
@@ -512,6 +537,7 @@ export function DemoDashboard() {
           incident={state?.incident ?? null}
           result={state?.result ?? null}
           steps={state?.steps ?? []}
+          runnerOnline={runnerOnline}
         />
         <IncidentTimeline steps={state?.steps ?? []} />
       </div>

@@ -133,6 +133,7 @@ describe("POST /api/demo/reset", () => {
     ["cooldown", 429],
     ["daily_cap", 429],
     ["runner_offline", 503],
+    ["environment_recovery_pending", 503],
   ] as const)("maps the backend %s result to HTTP %i", async (status, expectedHttpStatus) => {
     serverMock.requestDemoRun.mockResolvedValue({ status });
 
@@ -165,6 +166,7 @@ describe("POST /api/demo/reset", () => {
       { status: "cooldown" },
       { status: "daily_cap" },
       { status: "runner_offline" },
+      { status: "environment_recovery_pending" },
     ]) {
       serverMock.requestDemoRun.mockResolvedValueOnce(backendResult);
       const response = await POST(resetRequest());

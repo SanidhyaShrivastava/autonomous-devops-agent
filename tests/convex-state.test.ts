@@ -49,6 +49,18 @@ const updateIncidentPhase = makeFunctionReference<"mutation">(
 const completeIncident = makeFunctionReference<"mutation">(
   "runner:completeIncident",
 );
+const watchActiveRun = makeFunctionReference<"mutation">(
+  "runner:watchActiveRun",
+);
+const claimEnvironmentRecovery = makeFunctionReference<"mutation">(
+  "runner:claimEnvironmentRecovery",
+);
+const completeEnvironmentRecovery = makeFunctionReference<"mutation">(
+  "runner:completeEnvironmentRecovery",
+);
+const failEnvironmentRecovery = makeFunctionReference<"mutation">(
+  "runner:failEnvironmentRecovery",
+);
 
 type ConvexHarness = TestConvex<typeof schema>;
 
@@ -142,6 +154,19 @@ async function patchControl(t: ConvexHarness, patch: Record<string, unknown>) {
   });
 }
 
+async function markEnvironmentRestoredForTest(
+  t: ConvexHarness,
+  incidentId: string,
+) {
+  await t.run(async (ctx) => {
+    await ctx.db.patch(incidentId as never, {
+      environmentRecoveryStatus: "restored",
+      environmentRecoveryStartedAt: BASE_TIME,
+      environmentRecoveredAt: Date.now(),
+    } as never);
+  });
+}
+
 async function tableRows(t: ConvexHarness, table: string) {
   return await t.run(async (ctx) => {
     return (await ctx.db.query(table as never).collect()) as Array<
@@ -228,6 +253,80 @@ async function moveIncidentToInvestigating(t: ConvexHarness) {
   })) as VersionResult;
 
   return { ...created, incidentStateVersion: investigating.stateVersion };
+}
+
+type InvestigatingRun = Awaited<ReturnType<typeof moveIncidentToInvestigating>>;
+
+async function appendWatchdogProgressStep(
+  t: ConvexHarness,
+  run: InvestigatingRun,
+  step: {
+    nonce: string;
+    role: "incident_manager" | "investigator";
+    kind: string;
+    label: string;
+    at: number;
+  },
+) {
+  return await t.mutation(appendStep, {
+    runnerToken: RUNNER_TOKEN,
+    runnerId: RUNNER_ID,
+    demoCommandId: run.demoCommandId,
+    incidentId: run.incident.incidentId,
+    expectedCommandStateVersion: run.commandStateVersion,
+    expectedIncidentStateVersion: run.incidentStateVersion,
+    stepNonce: step.nonce,
+    role: step.role,
+    kind: step.kind,
+    status: "succeeded",
+    safeCommandLabel: step.label,
+    sanitizedOutput: `${step.label} completed`,
+    startedAt: step.at,
+    finishedAt: step.at,
+    latencyMs: 0,
+    costStatus: "not_reported",
+  });
+}
+
+async function appendFirstFourWatchdogSteps(
+  t: ConvexHarness,
+  run: InvestigatingRun,
+  fourthStepAt = BASE_TIME,
+) {
+  const steps = [
+    {
+      nonce: "watchdog-step-1",
+      role: "incident_manager" as const,
+      kind: "reset_demo_service",
+      label: "stop disposable service",
+      at: BASE_TIME,
+    },
+    {
+      nonce: "watchdog-step-2",
+      role: "incident_manager" as const,
+      kind: "confirm_failed_health",
+      label: "confirm failed health",
+      at: BASE_TIME,
+    },
+    {
+      nonce: "watchdog-step-3",
+      role: "investigator" as const,
+      kind: "inspect_service_state",
+      label: "inspect service state",
+      at: BASE_TIME,
+    },
+    {
+      nonce: "watchdog-step-4",
+      role: "investigator" as const,
+      kind: "read_service_logs",
+      label: "read service logs",
+      at: fourthStepAt,
+    },
+  ];
+
+  for (const step of steps) {
+    await appendWatchdogProgressStep(t, run, step);
+  }
 }
 
 async function moveIncidentToPolicyCheck(
@@ -466,10 +565,10 @@ describe("bounded demo command creation", () => {
     expect(await tableRows(t, "demoCommands")).toHaveLength(0);
   });
 
-  it("treats a 15-second heartbeat as fresh and 15,001ms as offline", async () => {
+  it("treats a 3,999ms heartbeat as fresh and 4 seconds as offline", async () => {
     const freshBoundary = createHarness();
     await makeRunnerFresh(freshBoundary);
-    vi.setSystemTime(BASE_TIME + 15_000);
+    vi.setSystemTime(BASE_TIME + 3_999);
     await expect(
       freshBoundary.mutation(requestRun, { requestSecret: DEMO_SECRET }),
     ).resolves.toMatchObject({ demoCommandId: expect.any(String) });
@@ -477,7 +576,7 @@ describe("bounded demo command creation", () => {
     vi.setSystemTime(BASE_TIME);
     const stale = createHarness();
     await makeRunnerFresh(stale);
-    vi.setSystemTime(BASE_TIME + 15_001);
+    vi.setSystemTime(BASE_TIME + 4_000);
     await expectErrorCode(
       stale.mutation(requestRun, { requestSecret: DEMO_SECRET }),
       "RUNNER_OFFLINE",
@@ -778,7 +877,7 @@ describe("runner authentication and atomic claims", () => {
     ]);
   });
 
-  it("does not claim an expired queued command", async () => {
+  it("terminalizes an expired queued command instead of claiming it", async () => {
     const t = createHarness();
     const { demoCommandId } = await createQueuedCommand(t);
     vi.setSystemTime(BASE_TIME + 90_001);
@@ -793,8 +892,24 @@ describe("runner authentication and atomic claims", () => {
       }),
     ).resolves.toEqual({ status: "expired", code: "COMMAND_EXPIRED" });
     expect(await tableRows(t, "demoCommands")).toEqual([
-      expect.objectContaining({ status: "expired" }),
+      expect.objectContaining({ status: "failed", finishedAt: Date.now() }),
     ]);
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      demoCommandId,
+      status: "failed",
+      currentPhase: "investigation_failed",
+      terminalReason: "run expired before the runner claimed it",
+      lastCompletedStepSequence: 0,
+      lastCompletedStepLabel: "no completed step",
+      environmentRecoveryStatus: "pending",
+      finishedAt: Date.now(),
+    });
+    const control = await getControl(t);
+    expect(control).not.toHaveProperty("activeDemoCommandId");
+    expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.environmentRecoveryIncidentId).toBe(incident._id);
   });
 
   it("rejects the wrong runner, stale lease, stale version, and wrong phase", async () => {
@@ -969,6 +1084,30 @@ describe("runner resume, retry, and lease cleanup", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control).not.toHaveProperty("lastRequestedAt");
+
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      demoCommandId,
+      status: "failed",
+      currentPhase: "investigation_failed",
+      terminalReason: "failed_to_seed_disposable_service",
+      lastCompletedStepSequence: 0,
+      lastCompletedStepLabel: "no completed step",
+      environmentRecoveryStatus: "pending",
+      finishedAt: BASE_TIME,
+    });
+    expect(control.environmentRecoveryIncidentId).toBe(incident._id);
+    expect(await tableRows(t, "steps")).toEqual([
+      expect.objectContaining({
+        incidentId: incident._id,
+        sequence: 1,
+        kind: "command_failed",
+        status: "failed",
+        errorSummary: "failed_to_seed_disposable_service",
+        finishedAt: BASE_TIME,
+      }),
+    ]);
   });
 
   it("returns the server recovery timestamp required for a fresh health request", async () => {
@@ -1086,7 +1225,7 @@ describe("runner resume, retry, and lease cleanup", () => {
     ]);
   });
 
-  it("heartbeat expires a queued command and clears its lock without throwing", async () => {
+  it("heartbeat terminalizes an expired queued command and queues cleanup", async () => {
     const t = createHarness();
     const { demoCommandId } = await createQueuedCommand(t);
     vi.setSystemTime(BASE_TIME + 90_001);
@@ -1100,11 +1239,26 @@ describe("runner resume, retry, and lease cleanup", () => {
     expect(await tableRows(t, "demoCommands")).toEqual([
       expect.objectContaining({
         _id: demoCommandId,
-        status: "expired",
+        status: "failed",
         finishedAt: BASE_TIME + 90_001,
       }),
     ]);
-    expect(await getControl(t)).not.toHaveProperty("activeDemoCommandId");
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      demoCommandId,
+      status: "failed",
+      currentPhase: "investigation_failed",
+      terminalReason: "run expired before the runner claimed it",
+      lastCompletedStepSequence: 0,
+      lastCompletedStepLabel: "no completed step",
+      environmentRecoveryStatus: "pending",
+      finishedAt: BASE_TIME + 90_001,
+    });
+    const control = await getControl(t);
+    expect(control).not.toHaveProperty("activeDemoCommandId");
+    expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.environmentRecoveryIncidentId).toBe(incident._id);
   });
 
   it("heartbeat fails an expired claimed command before any incident exists", async () => {
@@ -1124,10 +1278,32 @@ describe("runner resume, retry, and lease cleanup", () => {
         finishedAt: Date.now(),
       }),
     ]);
-    expect(await tableRows(t, "incidents")).toHaveLength(0);
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      demoCommandId,
+      status: "failed",
+      currentPhase: "investigation_failed",
+      terminalReason: "runner lost after step 0: no completed step",
+      lastCompletedStepSequence: 0,
+      lastCompletedStepLabel: "no completed step",
+      environmentRecoveryStatus: "pending",
+      finishedAt: Date.now(),
+    });
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.environmentRecoveryIncidentId).toBe(incident._id);
+    expect(await tableRows(t, "steps")).toEqual([
+      expect.objectContaining({
+        incidentId: incident._id,
+        sequence: 1,
+        kind: "runner_lost",
+        status: "failed",
+        errorSummary: "runner lost after step 0: no completed step",
+        finishedAt: Date.now(),
+      }),
+    ]);
   });
 
   it("heartbeat terminalizes an active incident when its runner lease expires", async () => {
@@ -1150,14 +1326,375 @@ describe("runner resume, retry, and lease cleanup", () => {
     expect(await tableRows(t, "incidents")).toEqual([
       expect.objectContaining({
         _id: created.incident.incidentId,
+        status: "failed",
         currentPhase: "investigation_failed",
-        terminalReason: "runner_lease_expired",
+        terminalReason: "runner lost after step 0: no completed step",
+        environmentRecoveryStatus: "pending",
         finishedAt: Date.now(),
       }),
     ]);
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control.environmentRecoveryIncidentId).toBe(
+      created.incident.incidentId,
+    );
+  });
+});
+
+describe("cloud active-run watchdog", () => {
+  it("creates a terminal incident when the runner disappears before incident creation", async () => {
+    const t = createHarness();
+    const { demoCommandId } = await claimQueuedCommand(t);
+    vi.setSystemTime(BASE_TIME + 4_000);
+
+    await t.mutation(watchActiveRun, {});
+
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      demoCommandId,
+      status: "failed",
+      currentPhase: "investigation_failed",
+      terminalReason: "runner lost after step 0: no completed step",
+      lastCompletedStepSequence: 0,
+      lastCompletedStepLabel: "no completed step",
+      environmentRecoveryStatus: "pending",
+      finishedAt: BASE_TIME + 4_000,
+    });
+    expect(await tableRows(t, "demoCommands")).toEqual([
+      expect.objectContaining({
+        _id: demoCommandId,
+        status: "failed",
+        finishedAt: BASE_TIME + 4_000,
+      }),
+    ]);
+    expect(await tableRows(t, "steps")).toEqual([
+      expect.objectContaining({
+        incidentId: incident._id,
+        sequence: 1,
+        status: "failed",
+        errorSummary: "runner lost after step 0: no completed step",
+      }),
+    ]);
+    const control = await getControl(t);
+    expect(control).not.toHaveProperty("activeDemoCommandId");
+    expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control.environmentRecoveryIncidentId).toBe(incident._id);
+  });
+
+  it("fails a run after two missed heartbeats, records the exact last progress, restores safety locks, and is idempotent", async () => {
+    const t = createHarness();
+    const active = await moveIncidentToInvestigating(t);
+    await appendFirstFourWatchdogSteps(t, active);
+    vi.setSystemTime(BASE_TIME + 4_000);
+
+    await t.mutation(watchActiveRun, {});
+
+    const [command] = await tableRows(t, "demoCommands");
+    expect(command).toMatchObject({
+      _id: active.demoCommandId,
+      status: "failed",
+      finishedAt: BASE_TIME + 4_000,
+    });
+
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      _id: active.incident.incidentId,
+      status: "failed",
+      currentPhase: "investigation_failed",
+      terminalReason: "runner lost after step 4: read service logs",
+      lastCompletedStepSequence: 4,
+      lastCompletedStepLabel: "read service logs",
+      environmentRecoveryStatus: "pending",
+      finishedAt: BASE_TIME + 4_000,
+    });
+
+    const stepsAfterFailure = await tableRows(t, "steps");
+    expect(stepsAfterFailure).toHaveLength(5);
+    expect(stepsAfterFailure).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          sequence: 5,
+          role: "incident_manager",
+          status: "failed",
+          errorSummary: "runner lost after step 4: read service logs",
+          finishedAt: BASE_TIME + 4_000,
+        }),
+      ]),
+    );
+
+    const control = await getControl(t);
+    expect(control).not.toHaveProperty("activeDemoCommandId");
+    expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control).not.toHaveProperty("lastRequestedAt");
+
+    const terminalSnapshot = await authoritativeSnapshot(t);
+    await t.mutation(watchActiveRun, {});
+    expect(await authoritativeSnapshot(t)).toEqual(terminalSnapshot);
+    expect(await tableRows(t, "steps")).toEqual(stepsAfterFailure);
+
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+
+    await expectErrorCode(
+      t.mutation(requestRun, { requestSecret: DEMO_SECRET }),
+      "ENVIRONMENT_RECOVERY_PENDING",
+    );
+    expect(await tableRows(t, "demoCommands")).toHaveLength(1);
+
+    await t.run(async (ctx) => {
+      await ctx.db.patch(active.incident.incidentId as never, {
+        environmentRecoveryStatus: "restored",
+        environmentRecoveryStartedAt: BASE_TIME + 4_000,
+        environmentRecoveredAt: BASE_TIME + 4_000,
+      } as never);
+    });
+    await expect(
+      t.mutation(requestRun, { requestSecret: DEMO_SECRET }),
+    ).resolves.toMatchObject({ demoCommandId: expect.any(String) });
+    expect(await tableRows(t, "demoCommands")).toHaveLength(2);
+  });
+
+  it("hands pending cleanup to the runner and restores only after fresh HTTP 200 proof", async () => {
+    const t = createHarness();
+    const active = await moveIncidentToInvestigating(t);
+    await appendFirstFourWatchdogSteps(t, active);
+    vi.setSystemTime(BASE_TIME + 4_000);
+    await t.mutation(watchActiveRun, {});
+
+    const heartbeatResult = (await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    })) as {
+      environmentRecovery?: { incidentId: string; stateVersion: number };
+    };
+    expect(heartbeatResult.environmentRecovery).toEqual({
+      incidentId: active.incident.incidentId,
+      stateVersion: 2,
+    });
+
+    await expect(
+      t.mutation(claimEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 2,
+      }),
+    ).resolves.toEqual({ status: "claimed", stateVersion: 3 });
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        terminalReason: "runner lost after step 4: read service logs",
+        environmentRecoveryStatus: "restoring",
+        environmentRecoveryStartedAt: BASE_TIME + 4_000,
+      }),
+    ]);
+
+    const beforeBadVerification = await authoritativeSnapshot(t);
+    await expectErrorCode(
+      t.mutation(completeEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 3,
+        verification: {
+          service: "wrong-service",
+          status: "healthy",
+          httpStatus: 200,
+          requestStartedAt: BASE_TIME + 4_000,
+          checkedAt: BASE_TIME + 4_000,
+        },
+      }),
+      "ENVIRONMENT_VERIFICATION_FAILED",
+    );
+    await expectErrorCode(
+      t.mutation(completeEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 3,
+        verification: {
+          service: "gx-autodevops-demo-service",
+          status: "healthy",
+          httpStatus: 200,
+          requestStartedAt: BASE_TIME - 1_001,
+          checkedAt: BASE_TIME + 4_000,
+        },
+      }),
+      "ENVIRONMENT_VERIFICATION_FAILED",
+    );
+    expect(await authoritativeSnapshot(t)).toEqual(beforeBadVerification);
+
+    await expectErrorCode(
+      t.mutation(failEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 2,
+      }),
+      "STALE_STATE",
+    );
+    await expect(
+      t.mutation(failEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 3,
+      }),
+    ).resolves.toEqual({ status: "pending", stateVersion: 4 });
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        environmentRecoveryStatus: "pending",
+        environmentRecoveryError:
+          "Demo environment restoration failed; retry required.",
+      }),
+    ]);
+    const publicFailedCleanup = (await t.query(getPublicState, {
+      demoCommandId: active.demoCommandId,
+    })) as {
+      incident: {
+        environmentRecoveryStatus: string | null;
+        environmentRecoveryError: string | null;
+      } | null;
+    };
+    expect(publicFailedCleanup.incident).toMatchObject({
+      environmentRecoveryStatus: "pending",
+      environmentRecoveryError:
+        "Demo environment restoration failed; retry required.",
+    });
+    const afterFailedCleanup = await authoritativeSnapshot(t);
+    await expectErrorCode(
+      t.mutation(failEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 3,
+      }),
+      "STALE_STATE",
+    );
+    expect(await authoritativeSnapshot(t)).toEqual(afterFailedCleanup);
+
+    const retriedClaim = (await t.mutation(claimEnvironmentRecovery, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      incidentId: active.incident.incidentId,
+      expectedStateVersion: 4,
+    })) as VersionResult;
+    expect(retriedClaim).toEqual({ status: "claimed", stateVersion: 5 });
+    await expect(
+      t.mutation(completeEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 5,
+        verification: {
+          service: "gx-autodevops-demo-service",
+          status: "healthy",
+          httpStatus: 200,
+          requestStartedAt: BASE_TIME + 4_000,
+          checkedAt: BASE_TIME + 4_000,
+        },
+      }),
+    ).resolves.toEqual({ status: "restored", stateVersion: 6 });
+
+    const restoredSnapshot = await authoritativeSnapshot(t);
+    expect(restoredSnapshot.incidents).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        currentPhase: "investigation_failed",
+        terminalReason: "runner lost after step 4: read service logs",
+        environmentRecoveryStatus: "restored",
+        environmentRecoveredAt: BASE_TIME + 4_000,
+      }),
+    ]);
+    expect(restoredSnapshot.control).not.toHaveProperty(
+      "environmentRecoveryIncidentId",
+    );
+    await expectErrorCode(
+      t.mutation(completeEnvironmentRecovery, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        incidentId: active.incident.incidentId,
+        expectedStateVersion: 5,
+        verification: {
+          service: "gx-autodevops-demo-service",
+          status: "healthy",
+          httpStatus: 200,
+          requestStartedAt: BASE_TIME + 4_000,
+          checkedAt: BASE_TIME + 4_000,
+        },
+      }),
+      "ENVIRONMENT_RECOVERY_NOT_FOUND",
+    );
+    expect(await authoritativeSnapshot(t)).toEqual(restoredSnapshot);
+    await expect(
+      t.mutation(heartbeat, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toEqual({
+      runnerHeartbeatAt: BASE_TIME + 4_000,
+      environmentRecovery: undefined,
+    });
+  });
+
+  it("fails at the exact 20-second per-step deadline while the runner heartbeat is fresh", async () => {
+    const t = createHarness();
+    const active = await moveIncidentToInvestigating(t);
+    await appendFirstFourWatchdogSteps(t, active);
+    vi.setSystemTime(BASE_TIME + 20_000);
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+
+    await t.mutation(watchActiveRun, {});
+
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      status: "failed",
+      lastCompletedStepSequence: 4,
+      lastCompletedStepLabel: "read service logs",
+      finishedAt: BASE_TIME + 20_000,
+    });
+    expect(String(incident.terminalReason)).toMatch(/20-second step deadline/i);
+  });
+
+  it("fails at the exact 45-second whole-run deadline even after recent progress", async () => {
+    const t = createHarness();
+    const active = await moveIncidentToInvestigating(t);
+    vi.setSystemTime(BASE_TIME + 29_000);
+    await t.mutation(renewLease, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: active.demoCommandId,
+      expectedStateVersion: active.commandStateVersion,
+    });
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    vi.setSystemTime(BASE_TIME + 44_000);
+    await appendFirstFourWatchdogSteps(t, active, BASE_TIME + 44_000);
+    vi.setSystemTime(BASE_TIME + 45_000);
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+
+    await t.mutation(watchActiveRun, {});
+
+    const [incident] = await tableRows(t, "incidents");
+    expect(incident).toMatchObject({
+      status: "failed",
+      lastCompletedStepSequence: 4,
+      lastCompletedStepLabel: "read service logs",
+      finishedAt: BASE_TIME + 45_000,
+    });
+    expect(String(incident.terminalReason)).toMatch(/45-second run deadline/i);
   });
 });
 
@@ -1579,6 +2116,7 @@ describe("recovery state and completion", () => {
       finalHealth: "failed",
       terminalReason: "human_review_requested",
     });
+    await markEnvironmentRestoredForTest(t, first.incident.incidentId);
 
     vi.setSystemTime(BASE_TIME + 60_000);
     const second = await moveIncidentToPolicyCheck(t);
@@ -2279,9 +2817,9 @@ describe("redacted public state", () => {
     });
   });
 
-  it("keeps an exact failed command separate from an older resolved incident", async () => {
+  it("shows a newer failed command instead of an older resolved incident after reload", async () => {
     const t = createHarness();
-    const { previousCommandId, failedCommandId } = await t.run(async (ctx) => {
+    const { failedCommandId } = await t.run(async (ctx) => {
       const previousCommandId = await ctx.db.insert("demoCommands", {
         kind: "RESET_DEMO_V1",
         status: "complete",
@@ -2315,7 +2853,7 @@ describe("redacted public state", () => {
         stateVersion: 1,
         idempotencyKey: "new-failed-command",
       });
-      return { previousCommandId, failedCommandId };
+      return { failedCommandId };
     });
 
     const latestState = (await t.query(getPublicState, {})) as {
@@ -2323,8 +2861,8 @@ describe("redacted public state", () => {
       incident: { currentPhase: string } | null;
     };
     expect(latestState).toMatchObject({
-      demoCommandId: previousCommandId,
-      incident: { currentPhase: "resolved" },
+      demoCommandId: failedCommandId,
+      incident: null,
     });
 
     const exactFailedState = (await t.query(getPublicState, {
@@ -2374,6 +2912,7 @@ describe("redacted public state", () => {
       finalHealth: "failed",
       terminalReason: "prior_incident_for_isolation_test",
     });
+    await markEnvironmentRestoredForTest(t, prior.incident.incidentId);
 
     vi.setSystemTime(BASE_TIME + 60_000);
     const fresh = await createQueuedCommand(t);

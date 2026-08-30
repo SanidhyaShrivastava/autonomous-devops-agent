@@ -113,12 +113,35 @@ export function ResolutionCard({
   incident,
   result,
   steps,
+  runnerOnline,
 }: {
   incident: PublicDemoState["incident"];
   result: PublicDemoState["result"];
   steps: PublicStep[];
+  runnerOnline: boolean;
 }) {
   const outcome = outcomeFor(incident);
+  const recoveryState = incident;
+  const lastCompletedStep =
+    recoveryState?.lastCompletedStepSequence !== null &&
+    recoveryState?.lastCompletedStepSequence !== undefined &&
+    recoveryState.lastCompletedStepLabel
+      ? `Step ${recoveryState.lastCompletedStepSequence} · ${humanize(
+          recoveryState.lastCompletedStepLabel,
+        )}`
+      : null;
+  const environmentRecoveryCopy =
+    recoveryState?.environmentRecoveryStatus === "pending"
+      ? recoveryState.environmentRecoveryError
+        ? "The last restoration attempt failed. The runner will retry automatically."
+        : runnerOnline
+          ? "Restoration queued; the runner will restore it automatically"
+          : "Restoration pending until the runner reconnects"
+      : recoveryState?.environmentRecoveryStatus === "restoring"
+        ? "Demo environment restoration in progress"
+        : recoveryState?.environmentRecoveryStatus === "restored"
+          ? "Demo environment restored and healthy"
+          : null;
   const recoveryStep = lastStepOfKinds(steps, [
     "recovery_executed",
     "recovery_failed",
@@ -156,6 +179,18 @@ export function ResolutionCard({
       </div>
 
       <dl className="resolution-list">
+        {lastCompletedStep ? (
+          <div>
+            <dt>Last completed step</dt>
+            <dd>{lastCompletedStep}</dd>
+          </div>
+        ) : null}
+        {environmentRecoveryCopy ? (
+          <div>
+            <dt>Demo environment</dt>
+            <dd>{environmentRecoveryCopy}</dd>
+          </div>
+        ) : null}
         <div>
           <dt>Incident type</dt>
           <dd>{humanize(incident?.incidentCategory ?? null)}</dd>

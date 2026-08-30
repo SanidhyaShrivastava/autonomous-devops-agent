@@ -95,7 +95,7 @@ const CASES: readonly EvalCase[] = [
     id: 9,
     name: "runner unavailable",
     checks: [
-      "bounded demo command creation treats a 15-second heartbeat as fresh and 15,001ms as offline",
+      "bounded demo command creation treats a 3,999ms heartbeat as fresh and 4 seconds as offline",
       "runner process loop closes the client if the first heartbeat cannot connect",
       "public recovery dashboard shows runner offline in text and explains why reset is disabled",
     ],

@@ -1,7 +1,5 @@
-import {
-  ConvexClient,
-  type ConnectionState,
-} from "convex/browser";
+import { ConvexClient, type ConnectionState } from "convex/browser";
+import { makeFunctionReference } from "convex/server";
 import { z } from "zod";
 
 import { api } from "../convex/_generated/api";
@@ -22,6 +20,10 @@ import type {
   UpdateIncidentPhaseInput,
   VersionedCommandInput,
 } from "./orchestrator";
+import type {
+  EnvironmentRecoveryClient,
+  EnvironmentRecoveryRequest,
+} from "./environment-restorer";
 
 const DemoCommandStatusSchema = z.enum([
   "queued",
@@ -44,6 +46,30 @@ const RecoveryCommandStatusSchema = z.enum([
 
 const ActionIdSchema = z.enum(["restart_demo_service", "no_action"]);
 const IdentifierSchema = z.string().min(1).max(128);
+
+const EnvironmentRecoveryRequestSchema = z
+  .object({
+    incidentId: IdentifierSchema,
+    stateVersion: z.number().int().nonnegative(),
+  })
+  .strict();
+
+const HeartbeatResultSchema = z
+  .object({
+    runnerHeartbeatAt: z.number().finite().nonnegative(),
+    environmentRecovery: EnvironmentRecoveryRequestSchema.nullable().optional(),
+  })
+  .strict();
+
+const claimEnvironmentRecoveryMutation = makeFunctionReference<"mutation">(
+  "runner:claimEnvironmentRecovery",
+);
+const completeEnvironmentRecoveryMutation = makeFunctionReference<"mutation">(
+  "runner:completeEnvironmentRecovery",
+);
+const failEnvironmentRecoveryMutation = makeFunctionReference<"mutation">(
+  "runner:failEnvironmentRecovery",
+);
 
 const ActiveDemoCommandSchema = z
   .object({
@@ -125,8 +151,14 @@ export interface ConvexRunnerClientOptions {
   readonly client?: ConvexClient;
 }
 
-export interface ConvexRunnerClient extends RecoveryStatePort {
-  heartbeat(): Promise<{ readonly runnerHeartbeatAt: number }>;
+export interface HeartbeatResult {
+  readonly runnerHeartbeatAt: number;
+  readonly environmentRecovery?: EnvironmentRecoveryRequest;
+}
+
+export interface ConvexRunnerClient
+  extends RecoveryStatePort, EnvironmentRecoveryClient {
+  heartbeat(): Promise<HeartbeatResult>;
   getActiveCommand(): Promise<RecoveryCommandSnapshot | null>;
   subscribeToActiveCommand(
     onCommand: (command: RecoveryCommandSnapshot | null) => unknown,
@@ -204,7 +236,8 @@ function mapCommand(rawCommand: unknown): RecoveryCommandSnapshot | null {
           diagnosisSummary: command.incident.diagnosisSummary,
           confidence: command.incident.confidence,
           requiresHuman: command.incident.requiresHuman,
-          proposedActionId: command.incident.proposedActionId as ActionId | null,
+          proposedActionId: command.incident
+            .proposedActionId as ActionId | null,
         }
       : null,
     recovery: command.recovery
@@ -245,7 +278,40 @@ export function createConvexRunnerClient(
 
   return {
     async heartbeat() {
-      return await client.mutation(api.runner.heartbeat, privateArgs);
+      const rawResult = await client.mutation(
+        api.runner.heartbeat,
+        privateArgs,
+      );
+      const result = HeartbeatResultSchema.parse(rawResult);
+      return {
+        runnerHeartbeatAt: result.runnerHeartbeatAt,
+        environmentRecovery: result.environmentRecovery ?? undefined,
+      };
+    },
+
+    async claimEnvironmentRecovery(input) {
+      return await client.mutation(claimEnvironmentRecoveryMutation, {
+        ...privateArgs,
+        incidentId: input.incidentId as Id<"incidents">,
+        expectedStateVersion: input.expectedStateVersion,
+      });
+    },
+
+    async completeEnvironmentRecovery(input) {
+      return await client.mutation(completeEnvironmentRecoveryMutation, {
+        ...privateArgs,
+        ...input,
+        incidentId: input.incidentId as Id<"incidents">,
+      });
+    },
+
+    async failEnvironmentRecovery(input) {
+      return await client.mutation(failEnvironmentRecoveryMutation, {
+        ...privateArgs,
+        incidentId: input.incidentId as Id<"incidents">,
+        expectedStateVersion: input.expectedStateVersion,
+        errorSummary: input.errorSummary,
+      });
     },
 
     async getActiveCommand() {
@@ -357,21 +423,17 @@ export function createConvexRunnerClient(
           ? [...input.diagnosisEvidence]
           : undefined,
         recoveryCommandId: input.recoveryCommandId as
-          | Id<"recoveryCommands">
-          | undefined,
+          Id<"recoveryCommands"> | undefined,
       });
     },
 
     async createRecoveryCommand(input: CreateRecoveryCommandInput) {
-      const result = await client.mutation(
-        api.runner.createRecoveryCommand,
-        {
-          ...privateArgs,
-          ...input,
-          demoCommandId: input.demoCommandId as Id<"demoCommands">,
-          incidentId: input.incidentId as Id<"incidents">,
-        },
-      );
+      const result = await client.mutation(api.runner.createRecoveryCommand, {
+        ...privateArgs,
+        ...input,
+        demoCommandId: input.demoCommandId as Id<"demoCommands">,
+        incidentId: input.incidentId as Id<"incidents">,
+      });
       return {
         recoveryCommandId: result.recoveryCommandId as string,
         stateVersion: result.stateVersion,
@@ -385,8 +447,7 @@ export function createConvexRunnerClient(
         demoCommandId: input.demoCommandId as Id<"demoCommands">,
         incidentId: input.incidentId as Id<"incidents">,
         recoveryCommandId: input.recoveryCommandId as
-          | Id<"recoveryCommands">
-          | undefined,
+          Id<"recoveryCommands"> | undefined,
       });
     },
 

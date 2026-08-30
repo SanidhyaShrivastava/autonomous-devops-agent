@@ -59,9 +59,24 @@ export const requestRun = mutation({
 
     if (
       control.runnerHeartbeatAt === undefined ||
-      now - control.runnerHeartbeatAt > RUNNER_FRESHNESS_MS
+      now - control.runnerHeartbeatAt >= RUNNER_FRESHNESS_MS
     ) {
       rejectWithCode("RUNNER_OFFLINE");
+    }
+
+    if (control.environmentRecoveryIncidentId) {
+      const recoveryIncident = await ctx.db.get(
+        control.environmentRecoveryIncidentId,
+      );
+      if (
+        recoveryIncident?.environmentRecoveryStatus === "pending" ||
+        recoveryIncident?.environmentRecoveryStatus === "restoring"
+      ) {
+        rejectWithCode("ENVIRONMENT_RECOVERY_PENDING");
+      }
+      await ctx.db.patch(control._id, {
+        environmentRecoveryIncidentId: undefined,
+      });
     }
 
     if (control.activeDemoCommandId || control.activeIncidentId) {
@@ -137,30 +152,35 @@ export const getPublicState = query({
     const hasControlActiveRun = Boolean(
       control?.activeDemoCommandId || control?.activeIncidentId,
     );
-    const latestHistoricalIncident =
+    const latestHistoricalCommand =
       args.demoCommandId || hasControlActiveRun
         ? null
         : await ctx.db
-            .query("incidents")
+            .query("demoCommands")
             .withIndex("by_created_at")
             .order("desc")
             .first();
+    const defaultCommand = activeCommand ?? latestHistoricalCommand;
+    const defaultIncident =
+      activeIncident ??
+      (defaultCommand
+        ? await ctx.db
+            .query("incidents")
+            .withIndex("by_demo_command", (q) =>
+              q.eq("demoCommandId", defaultCommand._id),
+            )
+            .unique()
+        : null);
     const displayedIncident = args.demoCommandId
       ? requestedIncident
-      : (activeIncident ?? latestHistoricalIncident);
+      : defaultIncident;
     const displayedCommand = args.demoCommandId
       ? requestedCommand
-      : activeCommand
-        ? activeCommand
+      : defaultCommand
+        ? defaultCommand
         : displayedIncident
           ? await ctx.db.get(displayedIncident.demoCommandId)
-          : hasControlActiveRun
-            ? null
-            : await ctx.db
-                .query("demoCommands")
-                .withIndex("by_created_at")
-                .order("desc")
-                .first();
+          : null;
     const commandStatus = displayedCommand
       ? displayedCommand.expiresAt <= now &&
         displayedCommand.status === "queued"
@@ -186,7 +206,7 @@ export const getPublicState = query({
 
     const runnerOnline =
       control?.runnerHeartbeatAt !== undefined &&
-      now - control.runnerHeartbeatAt <= RUNNER_FRESHNESS_MS;
+      now - control.runnerHeartbeatAt < RUNNER_FRESHNESS_MS;
     const cooldownRemainingMs = control?.lastRequestedAt
       ? Math.max(0, REQUEST_COOLDOWN_MS - (now - control.lastRequestedAt))
       : 0;
@@ -209,6 +229,15 @@ export const getPublicState = query({
         ? {
             incidentId: displayedIncident._id,
             staged: displayedIncident.staged,
+            status:
+              displayedIncident.status ??
+              (displayedIncident.currentPhase === "resolved"
+                ? "resolved"
+                : displayedIncident.currentPhase === "needs_human"
+                  ? "needs_human"
+                  : displayedIncident.finishedAt !== undefined
+                    ? "failed"
+                    : "active"),
             currentPhase: displayedIncident.currentPhase,
             initialHealth: sanitizeForPersistence(
               displayedIncident.initialHealth,
@@ -238,6 +267,26 @@ export const getPublicState = query({
             terminalReason: displayedIncident.terminalReason
               ? sanitizeForPersistence(displayedIncident.terminalReason, 500)
               : null,
+            lastCompletedStepSequence:
+              displayedIncident.lastCompletedStepSequence ?? null,
+            lastCompletedStepLabel: displayedIncident.lastCompletedStepLabel
+              ? sanitizeForPersistence(
+                  displayedIncident.lastCompletedStepLabel,
+                  120,
+                )
+              : null,
+            environmentRecoveryStatus:
+              displayedIncident.environmentRecoveryStatus ?? null,
+            environmentRecoveryError: displayedIncident.environmentRecoveryError
+              ? sanitizeForPersistence(
+                  displayedIncident.environmentRecoveryError,
+                  500,
+                )
+              : null,
+            environmentRecoveryStartedAt:
+              displayedIncident.environmentRecoveryStartedAt ?? null,
+            environmentRecoveredAt:
+              displayedIncident.environmentRecoveredAt ?? null,
           }
         : null,
       steps: descendingSteps.reverse().map((step) => ({

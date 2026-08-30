@@ -9,10 +9,13 @@ export const DEMO_HEALTHY_STATUS = "healthy" as const;
 export const MINIMUM_AUTONOMOUS_CONFIDENCE = 0.8;
 export const MAX_CLOCK_SKEW_MS = 5_000;
 
-export const RUNNER_FRESHNESS_MS = 15_000;
+export const RUNNER_FRESHNESS_MS = 4_000;
 export const REQUEST_COOLDOWN_MS = 60_000;
 export const COMMAND_EXPIRY_MS = 90_000;
 export const CLAIM_LEASE_MS = 30_000;
+export const RUNNER_HEARTBEAT_LOSS_MS = RUNNER_FRESHNESS_MS;
+export const ACTIVE_STEP_DEADLINE_MS = 20_000;
+export const ACTIVE_RUN_DEADLINE_MS = 45_000;
 export const DAILY_REQUEST_CAP = 30;
 export const PUBLIC_OUTPUT_LIMIT = 4_000;
 export const PUBLIC_STEP_LIMIT = 100;

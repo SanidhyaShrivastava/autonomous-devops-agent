@@ -2,12 +2,15 @@ import { v } from "convex/values";
 
 import type { Doc, Id } from "./_generated/dataModel";
 import {
+  internalMutation,
   mutation,
   query,
   type MutationCtx,
   type QueryCtx,
 } from "./_generated/server";
 import {
+  ACTIVE_RUN_DEADLINE_MS,
+  ACTIVE_STEP_DEADLINE_MS,
   CLAIM_LEASE_MS,
   DEMO_ACTION_ID,
   DEMO_HEALTHY_STATUS,
@@ -16,6 +19,7 @@ import {
   DEMO_WORKLOAD_ID,
   MAX_CLOCK_SKEW_MS,
   MINIMUM_AUTONOMOUS_CONFIDENCE,
+  RUNNER_HEARTBEAT_LOSS_MS,
   rejectWithCode,
   requireBoundedIdentifier,
   requireBoundedText,
@@ -182,6 +186,185 @@ async function requireActiveIncident(
   return incident;
 }
 
+function completedStepLabel(step: Doc<"steps"> | null) {
+  if (!step) {
+    return "no completed step";
+  }
+  const labelsByKind: Readonly<Record<string, string>> = {
+    reset_applied: "stop disposable service",
+    reset_demo_service: "stop disposable service",
+    failure_confirmed: "confirm failed health",
+    confirm_failed_health: "confirm failed health",
+    safe_state_collected: "inspect service state",
+    inspect_service_state: "inspect service state",
+    safe_logs_collected: "read service logs",
+    read_service_logs: "read service logs",
+  };
+  return (
+    labelsByKind[step.kind] ??
+    step.safeCommandLabel ??
+    step.kind.replaceAll("_", " ")
+  );
+}
+
+async function latestCompletedStep(
+  ctx: DatabaseContext,
+  demoCommandId: Id<"demoCommands">,
+) {
+  const steps = await ctx.db
+    .query("steps")
+    .withIndex("by_demo_command_sequence", (q) =>
+      q.eq("demoCommandId", demoCommandId),
+    )
+    .order("desc")
+    .take(100);
+  return (
+    steps.find(
+      (step) =>
+        step.finishedAt !== undefined &&
+        step.status !== "pending" &&
+        step.status !== "running",
+    ) ?? null
+  );
+}
+
+async function latestStep(
+  ctx: DatabaseContext,
+  demoCommandId: Id<"demoCommands">,
+) {
+  return await ctx.db
+    .query("steps")
+    .withIndex("by_demo_command_sequence", (q) =>
+      q.eq("demoCommandId", demoCommandId),
+    )
+    .order("desc")
+    .first();
+}
+
+async function failActiveRunFromWatchdog(
+  ctx: MutationCtx,
+  control: Doc<"demoControl">,
+  command: Doc<"demoCommands">,
+  incident: Doc<"incidents"> | null,
+  reason: string,
+  kind: string,
+  now: number,
+) {
+  const completed = await latestCompletedStep(ctx, command._id);
+  const last = await latestStep(ctx, command._id);
+  const lastCompletedStepSequence = completed?.sequence ?? 0;
+  const lastCompletedStepLabel = completedStepLabel(completed);
+  let terminalIncident = incident;
+
+  if (!terminalIncident) {
+    const incidentId = await ctx.db.insert("incidents", {
+      demoCommandId: command._id,
+      runId: `incident:${command._id}`,
+      staged: true,
+      runnerId: command.runnerId ?? DEMO_RUNNER_ID,
+      workloadId: DEMO_WORKLOAD_ID,
+      status: "failed",
+      currentPhase: "investigation_failed",
+      initialHealth:
+        command.status === "reset_applied" ||
+        command.status === "failure_confirmed"
+          ? "failed"
+          : "unknown",
+      finalHealth: "failed",
+      startedAt: command.claimedAt ?? command.createdAt,
+      finishedAt: now,
+      totalLatencyMs: Math.max(
+        0,
+        now - (command.claimedAt ?? command.createdAt),
+      ),
+      costStatus: "not_reported",
+      terminalReason: reason,
+      lastCompletedStepSequence,
+      lastCompletedStepLabel,
+      environmentRecoveryStatus: "pending",
+      stateVersion: 0,
+    });
+    terminalIncident = await ctx.db.get(incidentId);
+  }
+
+  if (
+    terminalIncident &&
+    !TERMINAL_STATES.has(terminalIncident.currentPhase)
+  ) {
+    const terminalPhase =
+      terminalIncident.currentPhase === "executing" ||
+      terminalIncident.currentPhase === "verifying"
+        ? "failed_recovery"
+        : "investigation_failed";
+    await ctx.db.patch(terminalIncident._id, {
+      status: "failed",
+      currentPhase: terminalPhase,
+      finalHealth: "failed",
+      finishedAt: now,
+      totalLatencyMs: Math.max(0, now - terminalIncident.startedAt),
+      terminalReason: reason,
+      lastCompletedStepSequence,
+      lastCompletedStepLabel,
+      environmentRecoveryStatus: "pending",
+      environmentRecoveryStartedAt: undefined,
+      environmentRecoveredAt: undefined,
+      environmentRecoveryError: undefined,
+      stateVersion: terminalIncident.stateVersion + 1,
+    });
+
+    const recovery = await ctx.db
+      .query("recoveryCommands")
+      .withIndex("by_incident", (q) =>
+        q.eq("incidentId", terminalIncident!._id),
+      )
+      .first();
+    if (
+      recovery &&
+      recovery.status !== "failed" &&
+      recovery.status !== "blocked"
+    ) {
+      await ctx.db.patch(recovery._id, {
+        status: "failed",
+        completedAt: now,
+        stateVersion: recovery.stateVersion + 1,
+      });
+    }
+  }
+
+  await ctx.db.insert("steps", {
+    demoCommandId: command._id,
+    incidentId: terminalIncident?._id,
+    sequence: (last?.sequence ?? 0) + 1,
+    stepNonce: `system_watchdog_${command._id}`,
+    role: "incident_manager",
+    kind,
+    status: "failed",
+    errorSummary: reason,
+    startedAt: now,
+    finishedAt: now,
+    latencyMs: 0,
+    costStatus: "not_reported",
+  });
+  await ctx.db.patch(command._id, {
+    status: "failed",
+    finishedAt: now,
+    leaseExpiresAt: undefined,
+    stateVersion: command.stateVersion + 1,
+  });
+  await ctx.db.patch(control._id, {
+    activeDemoCommandId: undefined,
+    activeIncidentId: undefined,
+    lastRequestedAt: undefined,
+    environmentRecoveryIncidentId: terminalIncident?._id,
+  });
+
+  return {
+    status: "failed" as const,
+    reason,
+    incidentId: terminalIncident?._id ?? null,
+  };
+}
+
 async function cleanExpiredActiveRun(
   ctx: MutationCtx,
   control: Doc<"demoControl">,
@@ -215,70 +398,92 @@ async function cleanExpiredActiveRun(
   const incident = control.activeIncidentId
     ? await ctx.db.get(control.activeIncidentId)
     : null;
-  if (incident && !TERMINAL_STATES.has(incident.currentPhase)) {
-    const terminalPhase =
-      incident.currentPhase === "executing" ||
-      incident.currentPhase === "verifying"
-        ? "failed_recovery"
-        : "investigation_failed";
-    await ctx.db.patch(incident._id, {
-      currentPhase: terminalPhase,
-      finalHealth: "failed",
-      finishedAt: now,
-      totalLatencyMs: Math.max(0, now - incident.startedAt),
-      terminalReason: "runner_lease_expired",
-      stateVersion: incident.stateVersion + 1,
-    });
-
-    const recovery = await ctx.db
-      .query("recoveryCommands")
-      .withIndex("by_incident", (q) => q.eq("incidentId", incident._id))
-      .first();
-    if (recovery && recovery.status !== "failed" && recovery.status !== "blocked") {
-      await ctx.db.patch(recovery._id, {
-        status: "failed",
-        completedAt: now,
-        stateVersion: recovery.stateVersion + 1,
-      });
-    }
-  }
-
-  const latestStep = await ctx.db
-    .query("steps")
-    .withIndex("by_demo_command_sequence", (q) =>
-      q.eq("demoCommandId", command._id),
-    )
-    .order("desc")
-    .first();
-  await ctx.db.insert("steps", {
-    demoCommandId: command._id,
-    incidentId: incident?._id,
-    sequence: (latestStep?.sequence ?? 0) + 1,
-    stepNonce: `system_expiry_${command._id}`,
-    role: "incident_manager",
-    kind: queuedExpired ? "command_expired" : "runner_lease_expired",
-    status: "failed",
-    errorSummary: queuedExpired
-      ? "Demo command expired before it was claimed."
-      : "Runner lease expired; the active run was closed safely.",
-    startedAt: now,
-    finishedAt: now,
-    latencyMs: 0,
-    costStatus: "not_reported",
-  });
-
-  await ctx.db.patch(command._id, {
-    status: queuedExpired ? "expired" : "failed",
-    finishedAt: now,
-    leaseExpiresAt: undefined,
-    stateVersion: command.stateVersion + 1,
-  });
-  await ctx.db.patch(control._id, {
-    activeDemoCommandId: undefined,
-    activeIncidentId: undefined,
-  });
+  const completed = await latestCompletedStep(ctx, command._id);
+  const lastCompletedStepSequence = completed?.sequence ?? 0;
+  const lastCompletedStepLabel = completedStepLabel(completed);
+  await failActiveRunFromWatchdog(
+    ctx,
+    control,
+    command,
+    incident,
+    leaseExpired
+      ? `runner lost after step ${lastCompletedStepSequence}: ${lastCompletedStepLabel}`
+      : "run expired before the runner claimed it",
+    leaseExpired ? "runner_lost" : "command_expired",
+    now,
+  );
   return true;
 }
+
+export const watchActiveRun = internalMutation({
+  args: {},
+  handler: async (ctx) => {
+    const now = Date.now();
+    const control = await getControl(ctx);
+    if (!control?.activeDemoCommandId) {
+      return { status: "idle" as const };
+    }
+
+    const command = await ctx.db.get(control.activeDemoCommandId);
+    if (
+      !command ||
+      command.status === "complete" ||
+      command.status === "expired" ||
+      command.status === "failed"
+    ) {
+      await ctx.db.patch(control._id, {
+        activeDemoCommandId: undefined,
+        activeIncidentId: undefined,
+      });
+      return { status: "idle" as const };
+    }
+
+    const incident = control.activeIncidentId
+      ? await ctx.db.get(control.activeIncidentId)
+      : null;
+    const completed = await latestCompletedStep(ctx, command._id);
+    const last = await latestStep(ctx, command._id);
+    const lastCompletedStepSequence = completed?.sequence ?? 0;
+    const lastCompletedStepLabel = completedStepLabel(completed);
+    const runnerLost =
+      control.runnerHeartbeatAt === undefined ||
+      now - control.runnerHeartbeatAt >= RUNNER_HEARTBEAT_LOSS_MS;
+    const runStartedAt = command.claimedAt ?? command.createdAt;
+    const runDeadlineReached =
+      now - runStartedAt >= ACTIVE_RUN_DEADLINE_MS;
+    const lastProgressAt =
+      last?.finishedAt ?? last?.startedAt ?? command.claimedAt ?? command.createdAt;
+    const stepDeadlineReached =
+      now - lastProgressAt >= ACTIVE_STEP_DEADLINE_MS;
+
+    let reason: string | null = null;
+    let kind = "active_run_watchdog_failed";
+    if (runnerLost) {
+      reason = `runner lost after step ${lastCompletedStepSequence}: ${lastCompletedStepLabel}`;
+      kind = "runner_lost";
+    } else if (runDeadlineReached) {
+      reason = `45-second run deadline exceeded after step ${lastCompletedStepSequence}: ${lastCompletedStepLabel}`;
+      kind = "run_deadline_exceeded";
+    } else if (stepDeadlineReached) {
+      reason = `20-second step deadline exceeded after step ${lastCompletedStepSequence}: ${lastCompletedStepLabel}`;
+      kind = "step_deadline_exceeded";
+    }
+
+    if (!reason) {
+      return { status: "active" as const };
+    }
+
+    return await failActiveRunFromWatchdog(
+      ctx,
+      control,
+      command,
+      incident,
+      reason,
+      kind,
+      now,
+    );
+  },
+});
 
 export const heartbeat = mutation({
   args: {
@@ -304,7 +509,190 @@ export const heartbeat = mutation({
       await ctx.db.patch(control._id, { runnerHeartbeatAt: now });
     }
 
-    return { runnerHeartbeatAt: now };
+    const refreshedControl = await getControl(ctx);
+    const recoveryIncident = refreshedControl?.environmentRecoveryIncidentId
+      ? await ctx.db.get(refreshedControl.environmentRecoveryIncidentId)
+      : null;
+    const environmentRecovery =
+      recoveryIncident &&
+      (recoveryIncident.environmentRecoveryStatus === "pending" ||
+        recoveryIncident.environmentRecoveryStatus === "restoring")
+        ? {
+            incidentId: recoveryIncident._id,
+            stateVersion: recoveryIncident.stateVersion,
+          }
+        : undefined;
+
+    return { runnerHeartbeatAt: now, environmentRecovery };
+  },
+});
+
+export const claimEnvironmentRecovery = mutation({
+  args: {
+    runnerToken: v.string(),
+    runnerId: v.string(),
+    incidentId: v.id("incidents"),
+    expectedStateVersion: v.number(),
+  },
+  handler: async (ctx, args) => {
+    requireRunnerToken(args.runnerToken);
+    requireDemoRunner(args.runnerId);
+
+    const incident = await ctx.db.get(args.incidentId);
+    const control = await getControl(ctx);
+    if (
+      !incident ||
+      control?.environmentRecoveryIncidentId !== incident._id
+    ) {
+      rejectWithCode("ENVIRONMENT_RECOVERY_NOT_FOUND");
+    }
+    if (incident.environmentRecoveryStatus === "restored") {
+      rejectWithCode("ENVIRONMENT_ALREADY_RESTORED");
+    }
+    if (
+      incident.environmentRecoveryStatus === "restoring" &&
+      (incident.stateVersion === args.expectedStateVersion ||
+        incident.stateVersion === args.expectedStateVersion + 1)
+    ) {
+      return {
+        status: "claimed" as const,
+        stateVersion: incident.stateVersion,
+      };
+    }
+    if (incident.stateVersion !== args.expectedStateVersion) {
+      rejectWithCode("STALE_STATE");
+    }
+    if (incident.environmentRecoveryStatus !== "pending") {
+      rejectWithCode("INVALID_ENVIRONMENT_RECOVERY_STATE");
+    }
+
+    const stateVersion = incident.stateVersion + 1;
+    await ctx.db.patch(incident._id, {
+      environmentRecoveryStatus: "restoring",
+      environmentRecoveryStartedAt: Date.now(),
+      environmentRecoveredAt: undefined,
+      environmentRecoveryError: undefined,
+      stateVersion,
+    });
+    return { status: "claimed" as const, stateVersion };
+  },
+});
+
+export const completeEnvironmentRecovery = mutation({
+  args: {
+    runnerToken: v.string(),
+    runnerId: v.string(),
+    incidentId: v.id("incidents"),
+    expectedStateVersion: v.number(),
+    verification: v.object({
+      service: v.string(),
+      status: v.string(),
+      httpStatus: v.number(),
+      requestStartedAt: v.number(),
+      checkedAt: v.number(),
+    }),
+  },
+  handler: async (ctx, args) => {
+    requireRunnerToken(args.runnerToken);
+    requireDemoRunner(args.runnerId);
+
+    const now = Date.now();
+    const incident = await ctx.db.get(args.incidentId);
+    const control = await getControl(ctx);
+    if (
+      !incident ||
+      control?.environmentRecoveryIncidentId !== incident._id
+    ) {
+      rejectWithCode("ENVIRONMENT_RECOVERY_NOT_FOUND");
+    }
+    if (incident.stateVersion !== args.expectedStateVersion) {
+      rejectWithCode("STALE_STATE");
+    }
+    if (
+      incident.environmentRecoveryStatus !== "restoring" ||
+      incident.environmentRecoveryStartedAt === undefined
+    ) {
+      rejectWithCode("INVALID_ENVIRONMENT_RECOVERY_STATE");
+    }
+
+    const requestStartedAt = requireFiniteTimestamp(
+      args.verification.requestStartedAt,
+      "verification_request_started_at",
+    );
+    const checkedAt = requireFiniteTimestamp(
+      args.verification.checkedAt,
+      "verification_checked_at",
+    );
+    if (
+      args.verification.service !== DEMO_SERVICE_IDENTITY ||
+      args.verification.status !== DEMO_HEALTHY_STATUS ||
+      args.verification.httpStatus !== 200 ||
+      requestStartedAt + MAX_CLOCK_SKEW_MS <
+        incident.environmentRecoveryStartedAt ||
+      checkedAt < requestStartedAt ||
+      checkedAt > now + MAX_CLOCK_SKEW_MS
+    ) {
+      rejectWithCode("ENVIRONMENT_VERIFICATION_FAILED");
+    }
+
+    const stateVersion = incident.stateVersion + 1;
+    await ctx.db.patch(incident._id, {
+      environmentRecoveryStatus: "restored",
+      environmentRecoveredAt: now,
+      environmentRecoveryError: undefined,
+      stateVersion,
+    });
+    await ctx.db.patch(control._id, {
+      environmentRecoveryIncidentId: undefined,
+    });
+    return { status: "restored" as const, stateVersion };
+  },
+});
+
+export const failEnvironmentRecovery = mutation({
+  args: {
+    runnerToken: v.string(),
+    runnerId: v.string(),
+    incidentId: v.id("incidents"),
+    expectedStateVersion: v.number(),
+    errorSummary: v.optional(v.string()),
+  },
+  handler: async (ctx, args) => {
+    requireRunnerToken(args.runnerToken);
+    requireDemoRunner(args.runnerId);
+
+    const incident = await ctx.db.get(args.incidentId);
+    const control = await getControl(ctx);
+    if (
+      !incident ||
+      control?.environmentRecoveryIncidentId !== incident._id
+    ) {
+      rejectWithCode("ENVIRONMENT_RECOVERY_NOT_FOUND");
+    }
+    if (incident.stateVersion !== args.expectedStateVersion) {
+      rejectWithCode("STALE_STATE");
+    }
+    if (incident.environmentRecoveryStatus !== "restoring") {
+      rejectWithCode("INVALID_ENVIRONMENT_RECOVERY_STATE");
+    }
+
+    const stateVersion = incident.stateVersion + 1;
+    await ctx.db.patch(incident._id, {
+      environmentRecoveryStatus: "pending",
+      environmentRecoveryStartedAt: undefined,
+      environmentRecoveredAt: undefined,
+      environmentRecoveryError: sanitizeForPersistence(
+        requireBoundedText(
+          args.errorSummary ??
+            "Demo environment restoration failed; retry required.",
+          "error_summary",
+          500,
+        ),
+        500,
+      ),
+      stateVersion,
+    });
+    return { status: "pending" as const, stateVersion };
   },
 });
 
@@ -497,38 +885,16 @@ export const failDemoCommand = mutation({
       requireBoundedText(args.terminalReason, "terminal_reason", 500),
       500,
     );
-    const latestStep = await ctx.db
-      .query("steps")
-      .withIndex("by_demo_command_sequence", (q) =>
-        q.eq("demoCommandId", command._id),
-      )
-      .order("desc")
-      .first();
-    await ctx.db.insert("steps", {
-      demoCommandId: command._id,
-      sequence: (latestStep?.sequence ?? 0) + 1,
-      stepNonce: `system_command_failure_${command._id}`,
-      role: "incident_manager",
-      kind: "command_failed",
-      status: "failed",
-      errorSummary: terminalReason,
-      startedAt: now,
-      finishedAt: now,
-      latencyMs: 0,
-      costStatus: "not_reported",
-    });
-
     const stateVersion = command.stateVersion + 1;
-    await ctx.db.patch(command._id, {
-      status: "failed",
-      finishedAt: now,
-      leaseExpiresAt: undefined,
-      stateVersion,
-    });
-    await ctx.db.patch(control._id, {
-      activeDemoCommandId: undefined,
-      activeIncidentId: undefined,
-    });
+    await failActiveRunFromWatchdog(
+      ctx,
+      control,
+      command,
+      null,
+      terminalReason,
+      "command_failed",
+      now,
+    );
     return { status: "failed" as const, stateVersion };
   },
 });
@@ -583,12 +949,15 @@ export const claimDemoCommand = mutation({
     }
 
     if (now > command.expiresAt) {
-      await ctx.db.patch(command._id, {
-        status: "expired",
-        finishedAt: now,
-        stateVersion: command.stateVersion + 1,
-      });
-      await ctx.db.patch(control._id, { activeDemoCommandId: undefined });
+      await failActiveRunFromWatchdog(
+        ctx,
+        control,
+        command,
+        null,
+        "run expired before the runner claimed it",
+        "command_expired",
+        now,
+      );
       return { status: "expired" as const, code: "COMMAND_EXPIRED" as const };
     }
 
@@ -752,6 +1121,7 @@ export const createIncidentFromConfirmedFailure = mutation({
       staged: true,
       runnerId: DEMO_RUNNER_ID,
       workloadId: DEMO_WORKLOAD_ID,
+      status: "active",
       currentPhase: "failed_detected",
       initialHealth: "failed",
       startedAt: now,
@@ -1427,13 +1797,29 @@ export const completeIncident = mutation({
           500,
         )
       : args.terminalState;
+    const completed = await latestCompletedStep(ctx, command._id);
+    const needsEnvironmentRecovery = args.terminalState !== "resolved";
 
     await ctx.db.patch(incident._id, {
+      status:
+        args.terminalState === "resolved"
+          ? "resolved"
+          : args.terminalState === "needs_human"
+            ? "needs_human"
+            : "failed",
       currentPhase: args.terminalState,
       finalHealth,
       finishedAt,
       totalLatencyMs: Math.max(0, finishedAt - incident.startedAt),
       terminalReason,
+      lastCompletedStepSequence: completed?.sequence ?? 0,
+      lastCompletedStepLabel: completedStepLabel(completed),
+      environmentRecoveryStatus: needsEnvironmentRecovery
+        ? "pending"
+        : undefined,
+      environmentRecoveryStartedAt: undefined,
+      environmentRecoveredAt: undefined,
+      environmentRecoveryError: undefined,
       stateVersion,
     });
     await ctx.db.patch(command._id, {
@@ -1461,6 +1847,12 @@ export const completeIncident = mutation({
       await ctx.db.patch(control._id, {
         activeDemoCommandId: undefined,
         activeIncidentId: undefined,
+        lastRequestedAt: needsEnvironmentRecovery
+          ? undefined
+          : control.lastRequestedAt,
+        environmentRecoveryIncidentId: needsEnvironmentRecovery
+          ? incident._id
+          : undefined,
       });
     }
 

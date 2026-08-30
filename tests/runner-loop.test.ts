@@ -7,10 +7,7 @@ import type {
   RecoveryCommandSnapshot,
   RecoveryOrchestrator,
 } from "../runner/orchestrator";
-import {
-  startRunnerLoop,
-  verifyIdleDemoWorkloadReady,
-} from "../runner/index";
+import { startRunnerLoop, verifyIdleDemoWorkloadReady } from "../runner/index";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -35,8 +32,20 @@ const command = (id: string): RecoveryCommandSnapshot => ({
   stepNonces: [],
 });
 
+const environmentRecoveryRequest = {
+  incidentId: "incident_1",
+  stateVersion: 4,
+} as const;
+
+interface FakeHeartbeatResult {
+  readonly runnerHeartbeatAt: number;
+  readonly environmentRecovery?: typeof environmentRecoveryRequest;
+}
+
 class FakeRunnerClient {
-  readonly heartbeat = vi.fn(async () => ({ runnerHeartbeatAt: Date.now() }));
+  readonly heartbeat = vi.fn(async (): Promise<FakeHeartbeatResult> => ({
+    runnerHeartbeatAt: Date.now(),
+  }));
   readonly getActiveCommand = vi.fn(
     async (): Promise<RecoveryCommandSnapshot | null> => null,
   );
@@ -44,8 +53,7 @@ class FakeRunnerClient {
   throwOnConnectionState = false;
   throwOnConnectionSubscription = false;
   commandCallback:
-    | ((command: RecoveryCommandSnapshot | null) => unknown)
-    | null = null;
+    ((command: RecoveryCommandSnapshot | null) => unknown) | null = null;
   commandErrorCallback: ((error: Error) => unknown) | null = null;
   readonly unsubscribeCommand = vi.fn();
   readonly unsubscribeConnection = vi.fn();
@@ -194,6 +202,208 @@ describe("runner process loop", () => {
     await runtime.stop();
   });
 
+  it("sends heartbeats every two seconds by default", async () => {
+    vi.useFakeTimers();
+    const fakeClient = new FakeRunnerClient();
+    const runtime = await startRunnerLoop({
+      client: asClient(fakeClient),
+      orchestrator: {
+        async run(snapshot): Promise<OrchestrationResult> {
+          return { status: "ignored", demoCommandId: snapshot.id };
+        },
+      },
+    });
+
+    await vi.advanceTimersByTimeAsync(1_999);
+    const callsBeforeTwoSeconds = fakeClient.heartbeat.mock.calls.length;
+    await vi.advanceTimersByTimeAsync(1);
+    const callsAtTwoSeconds = fakeClient.heartbeat.mock.calls.length;
+    await runtime.stop();
+
+    expect(callsBeforeTwoSeconds).toBe(1);
+    expect(callsAtTwoSeconds).toBe(2);
+  });
+
+  it("aborts an active run before restoring an environment requested by heartbeat", async () => {
+    vi.useFakeTimers();
+    const fakeClient = new FakeRunnerClient();
+    fakeClient.heartbeat
+      .mockResolvedValueOnce({ runnerHeartbeatAt: 1 })
+      .mockResolvedValueOnce({
+        runnerHeartbeatAt: 2,
+        environmentRecovery: environmentRecoveryRequest,
+      });
+    const activeRun = deferred<OrchestrationResult>();
+    const order: string[] = [];
+    let activeSignal: AbortSignal | undefined;
+    const environmentRestorer = {
+      restoreDemoEnvironment: vi.fn(async () => {
+        order.push("restore");
+        return { status: "restored" as const, incidentId: "incident_1" };
+      }),
+    };
+    const runtime = await startRunnerLoop({
+      client: asClient(fakeClient),
+      orchestrator: {
+        async run(snapshot, signal): Promise<OrchestrationResult> {
+          activeSignal = signal;
+          signal?.addEventListener(
+            "abort",
+            () =>
+              activeRun.resolve({
+                status: "ignored",
+                demoCommandId: snapshot.id,
+              }),
+            { once: true },
+          );
+          const result = await activeRun.promise;
+          order.push("run-finished");
+          return result;
+        },
+      },
+      heartbeatIntervalMs: 10,
+      environmentRestorer,
+    });
+    fakeClient.commandCallback?.(command("command_1"));
+    await flushPromises();
+
+    await vi.advanceTimersByTimeAsync(10);
+    await flushPromises();
+    const wasAborted = activeSignal?.aborted ?? false;
+    if (!wasAborted) {
+      activeRun.resolve({ status: "ignored", demoCommandId: "command_1" });
+    }
+    await flushPromises();
+    const restoreCalls =
+      environmentRestorer.restoreDemoEnvironment.mock.calls.length;
+    await runtime.stop();
+
+    expect(wasAborted).toBe(true);
+    expect(restoreCalls).toBe(1);
+    expect(order).toEqual(["run-finished", "restore"]);
+  });
+
+  it("runs a command delivered while environment restoration is finishing", async () => {
+    vi.useFakeTimers();
+    const fakeClient = new FakeRunnerClient();
+    fakeClient.heartbeat
+      .mockResolvedValueOnce({ runnerHeartbeatAt: 1 })
+      .mockResolvedValueOnce({
+        runnerHeartbeatAt: 2,
+        environmentRecovery: environmentRecoveryRequest,
+      });
+    const restorationStarted = deferred<void>();
+    const finishRestoration = deferred<void>();
+    const seenCommands: string[] = [];
+    const environmentRestorer = {
+      restoreDemoEnvironment: vi.fn(async () => {
+        restorationStarted.resolve();
+        await finishRestoration.promise;
+        return { status: "restored" as const, incidentId: "incident_1" };
+      }),
+    };
+    const runtime = await startRunnerLoop({
+      client: asClient(fakeClient),
+      orchestrator: {
+        async run(snapshot): Promise<OrchestrationResult> {
+          seenCommands.push(snapshot.id);
+          return { status: "ignored", demoCommandId: snapshot.id };
+        },
+      },
+      heartbeatIntervalMs: 10,
+      environmentRestorer,
+    });
+
+    await vi.advanceTimersByTimeAsync(10);
+    await restorationStarted.promise;
+    fakeClient.commandCallback?.(command("command_after_cleanup"));
+    await flushPromises();
+    expect(seenCommands).toEqual([]);
+
+    finishRestoration.resolve();
+    await flushPromises();
+    await runtime.stop();
+
+    expect(environmentRestorer.restoreDemoEnvironment).toHaveBeenCalledOnce();
+    expect(seenCommands).toEqual(["command_after_cleanup"]);
+  });
+
+  it("restores a pending environment before startup subscriptions begin", async () => {
+    const fakeClient = new FakeRunnerClient();
+    fakeClient.heartbeat.mockResolvedValueOnce({
+      runnerHeartbeatAt: 1,
+      environmentRecovery: environmentRecoveryRequest,
+    });
+    const restoration = deferred<{
+      status: "restored";
+      incidentId: string;
+    }>();
+    const startupOrder: string[] = [];
+    const environmentRestorer = {
+      restoreDemoEnvironment: vi.fn(async () => {
+        const result = await restoration.promise;
+        startupOrder.push("restored");
+        return result;
+      }),
+    };
+    const verifyStartupReady = vi.fn(async () => {
+      startupOrder.push("ready");
+    });
+
+    const starting = startRunnerLoop({
+      client: asClient(fakeClient),
+      orchestrator: {
+        async run(snapshot): Promise<OrchestrationResult> {
+          return { status: "ignored", demoCommandId: snapshot.id };
+        },
+      },
+      environmentRestorer,
+      verifyStartupReady,
+    });
+    await flushPromises();
+    const subscribedBeforeRestoration = fakeClient.commandCallback !== null;
+    restoration.resolve({ status: "restored", incidentId: "incident_1" });
+    const runtime = await starting;
+    await runtime.stop();
+
+    expect(environmentRestorer.restoreDemoEnvironment).toHaveBeenCalledOnce();
+    expect(verifyStartupReady).toHaveBeenCalledOnce();
+    expect(startupOrder).toEqual(["restored", "ready"]);
+    expect(subscribedBeforeRestoration).toBe(false);
+  });
+
+  it("does not restore the same completed environment request twice", async () => {
+    vi.useFakeTimers();
+    const fakeClient = new FakeRunnerClient();
+    fakeClient.heartbeat.mockResolvedValue({
+      runnerHeartbeatAt: 1,
+      environmentRecovery: environmentRecoveryRequest,
+    });
+    const environmentRestorer = {
+      restoreDemoEnvironment: vi.fn(async () => ({
+        status: "restored" as const,
+        incidentId: "incident_1",
+      })),
+    };
+    const runtime = await startRunnerLoop({
+      client: asClient(fakeClient),
+      orchestrator: {
+        async run(snapshot): Promise<OrchestrationResult> {
+          return { status: "ignored", demoCommandId: snapshot.id };
+        },
+      },
+      heartbeatIntervalMs: 10,
+      environmentRestorer,
+    });
+
+    await vi.advanceTimersByTimeAsync(20);
+    await flushPromises();
+    await runtime.stop();
+
+    expect(fakeClient.heartbeat).toHaveBeenCalledTimes(3);
+    expect(environmentRestorer.restoreDemoEnvironment).toHaveBeenCalledOnce();
+  });
+
   it("reports live-subscription failures without exposing the backend message", async () => {
     const fakeClient = new FakeRunnerClient();
     const logError = vi.fn();
@@ -312,11 +522,7 @@ describe("runner process loop", () => {
     stuckTail.resolve({ status: "ignored", demoCommandId: "command_1" });
   });
 
-  it.each([
-    "command",
-    "connection-state",
-    "connection-subscription",
-  ] as const)(
+  it.each(["command", "connection-state", "connection-subscription"] as const)(
     "cleans up after a %s setup failure",
     async (failurePoint) => {
       const fakeClient = new FakeRunnerClient();
@@ -428,9 +634,9 @@ describe("runner startup readiness", () => {
       checkHealthOnce: vi.fn(async () => ({ ...healthy, healthy: false })),
     };
 
-    await expect(
-      verifyIdleDemoWorkloadReady(client, workload),
-    ).rejects.toThrow("not healthy");
+    await expect(verifyIdleDemoWorkloadReady(client, workload)).rejects.toThrow(
+      "not healthy",
+    );
   });
 
   it("resumes a freshly leased command after validating container identity", async () => {

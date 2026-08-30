@@ -24,6 +24,19 @@ const incidentPhase = v.union(
   v.literal("investigation_failed"),
 );
 
+const incidentStatus = v.union(
+  v.literal("active"),
+  v.literal("resolved"),
+  v.literal("failed"),
+  v.literal("needs_human"),
+);
+
+const environmentRecoveryStatus = v.union(
+  v.literal("pending"),
+  v.literal("restoring"),
+  v.literal("restored"),
+);
+
 const recoveryCommandStatus = v.union(
   v.literal("proposed"),
   v.literal("allowed"),
@@ -71,6 +84,7 @@ export default defineSchema({
     dayKey: v.string(),
     dayCount: v.number(),
     runnerHeartbeatAt: v.optional(v.number()),
+    environmentRecoveryIncidentId: v.optional(v.id("incidents")),
   }).index("by_key", ["key"]),
 
   demoCommands: defineTable({
@@ -95,6 +109,7 @@ export default defineSchema({
     staged: v.boolean(),
     runnerId: v.string(),
     workloadId: v.literal("demo-service"),
+    status: v.optional(incidentStatus),
     currentPhase: incidentPhase,
     initialHealth: v.string(),
     finalHealth: v.optional(v.string()),
@@ -113,6 +128,12 @@ export default defineSchema({
     reportedOutputTokens: v.optional(v.number()),
     costStatus,
     terminalReason: v.optional(v.string()),
+    lastCompletedStepSequence: v.optional(v.number()),
+    lastCompletedStepLabel: v.optional(v.string()),
+    environmentRecoveryStatus: v.optional(environmentRecoveryStatus),
+    environmentRecoveryStartedAt: v.optional(v.number()),
+    environmentRecoveredAt: v.optional(v.number()),
+    environmentRecoveryError: v.optional(v.string()),
     stateVersion: v.number(),
   })
     .index("by_created_at", ["startedAt"])

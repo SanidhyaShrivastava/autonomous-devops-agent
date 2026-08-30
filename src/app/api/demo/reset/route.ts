@@ -50,6 +50,7 @@ export async function POST(request: Request) {
       case "daily_cap":
         return json({ error: "Demo request limit reached" }, 429);
       case "runner_offline":
+      case "environment_recovery_pending":
       case "disabled":
         return json({ error: "Demo runner is unavailable" }, 503);
     }

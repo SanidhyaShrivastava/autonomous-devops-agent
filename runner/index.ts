@@ -11,10 +11,17 @@ import {
 import {
   createConvexRunnerClient,
   type ConvexRunnerClient,
+  type HeartbeatResult,
 } from "./convex-client";
 import { createCodexInvestigator } from "./codex-investigator";
 import { DEMO_LABEL_VALUE } from "./config";
 import { DockerAdapter } from "./docker-adapter";
+import {
+  createEnvironmentRestorer,
+  type EnvironmentRecoveryRequest,
+  type EnvironmentRestorationResult,
+  type EnvironmentRestorer,
+} from "./environment-restorer";
 import {
   createRecoveryOrchestrator,
   type DemoWorkloadPort,
@@ -23,7 +30,7 @@ import {
   type RecoveryOrchestrator,
 } from "./orchestrator";
 
-const DEFAULT_HEARTBEAT_INTERVAL_MS = 5_000;
+const DEFAULT_HEARTBEAT_INTERVAL_MS = 2_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;
 
 export interface RunnerLoopOptions {
@@ -31,6 +38,8 @@ export interface RunnerLoopOptions {
   readonly orchestrator: RecoveryOrchestrator;
   readonly heartbeatIntervalMs?: number;
   readonly shutdownGraceMs?: number;
+  readonly environmentRestorer?: EnvironmentRestorer;
+  readonly verifyStartupReady?: () => Promise<void>;
   readonly logInfo?: (message: string) => void;
   readonly logError?: (message: string) => void;
 }
@@ -42,11 +51,10 @@ export interface RunnerLoop {
 export async function startRunnerLoop(
   options: RunnerLoopOptions,
 ): Promise<RunnerLoop> {
-  const { client, orchestrator } = options;
+  const { client, orchestrator, environmentRestorer } = options;
   const heartbeatIntervalMs =
     options.heartbeatIntervalMs ?? DEFAULT_HEARTBEAT_INTERVAL_MS;
-  const shutdownGraceMs =
-    options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
+  const shutdownGraceMs = options.shutdownGraceMs ?? DEFAULT_SHUTDOWN_GRACE_MS;
   const logInfo = options.logInfo ?? ((message) => console.log(message));
   const logError = options.logError ?? ((message) => console.error(message));
   if (!Number.isFinite(heartbeatIntervalMs) || heartbeatIntervalMs <= 0) {
@@ -66,6 +74,10 @@ export async function startRunnerLoop(
   let criticalMutationCount = 0;
   let criticalMutationBoundary: Promise<void> | null = null;
   let resolveCriticalMutationBoundary: (() => void) | null = null;
+  let restorationInProgress = false;
+  let subscriptionsReady = false;
+  let drainCommands: () => void = () => undefined;
+  const completedEnvironmentRecoveries = new Set<string>();
 
   const activityObserver: RecoveryActivityObserver = {
     onCriticalMutationStart() {
@@ -92,13 +104,61 @@ export async function startRunnerLoop(
     },
   };
 
+  const restoreEnvironment = async (
+    request: EnvironmentRecoveryRequest,
+  ): Promise<EnvironmentRestorationResult> => {
+    if (completedEnvironmentRecoveries.has(request.incidentId)) {
+      return { status: "ignored", incidentId: request.incidentId };
+    }
+    if (!environmentRestorer) {
+      throw new Error("Environment restoration is not configured");
+    }
+
+    restorationInProgress = true;
+    pendingCommand = undefined;
+    activeAbortController?.abort();
+    if (drainPromise) {
+      await drainPromise;
+    }
+
+    activityObserver.onCriticalMutationStart();
+    try {
+      const result = await environmentRestorer.restoreDemoEnvironment(request);
+      if (result.status === "restored" || result.status === "ignored") {
+        completedEnvironmentRecoveries.add(request.incidentId);
+      } else {
+        logError(
+          "Demo environment restoration did not verify healthy; cleanup remains pending.",
+        );
+      }
+      return result;
+    } finally {
+      activityObserver.onCriticalMutationEnd();
+      restorationInProgress = false;
+      if (!stopped && subscriptionsReady && pendingCommand !== undefined) {
+        drainCommands();
+      }
+    }
+  };
+
+  const handleHeartbeat = async (result: HeartbeatResult) => {
+    if (!result.environmentRecovery) {
+      return null;
+    }
+    return await restoreEnvironment(result.environmentRecovery);
+  };
+
   try {
-    await client.heartbeat();
+    const initialHeartbeat = await client.heartbeat();
+    const initialRestoration = await handleHeartbeat(initialHeartbeat);
+    if (initialRestoration?.status !== "failed") {
+      await options.verifyStartupReady?.();
+    }
   } catch (error) {
     try {
       await client.close();
     } catch {
-      // Preserve the original connection error.
+      // Preserve the original connection or readiness error.
     }
     throw error;
   }
@@ -111,6 +171,7 @@ export async function startRunnerLoop(
       heartbeatTimer = null;
       heartbeatPromise = client
         .heartbeat()
+        .then(handleHeartbeat)
         .then(() => undefined)
         .catch(() => {
           logError(
@@ -124,12 +185,16 @@ export async function startRunnerLoop(
     }, heartbeatIntervalMs);
   };
 
-  const drainCommands = () => {
-    if (stopped || drainPromise) {
+  drainCommands = () => {
+    if (stopped || restorationInProgress || drainPromise) {
       return;
     }
     const draining = (async () => {
-      while (!stopped && pendingCommand !== undefined) {
+      while (
+        !stopped &&
+        !restorationInProgress &&
+        pendingCommand !== undefined
+      ) {
         const command = pendingCommand;
         pendingCommand = undefined;
         if (!command) {
@@ -168,12 +233,8 @@ export async function startRunnerLoop(
 
   let unsubscribeCommand: () => void = () => undefined;
   let unsubscribeConnection: () => void = () => undefined;
-  let subscriptionsReady = false;
   const unsubscribeSafely = () => {
-    for (const unsubscribe of [
-      unsubscribeCommand,
-      unsubscribeConnection,
-    ]) {
+    for (const unsubscribe of [unsubscribeCommand, unsubscribeConnection]) {
       try {
         unsubscribe();
       } catch {
@@ -188,7 +249,7 @@ export async function startRunnerLoop(
           return;
         }
         pendingCommand = command;
-        if (subscriptionsReady) {
+        if (subscriptionsReady && !restorationInProgress) {
           drainCommands();
         }
       },
@@ -282,9 +343,9 @@ export async function verifyIdleDemoWorkloadReady(
   const safeState = await workload.inspectSafeState();
   const hasFreshResumableLease = Boolean(
     activeCommand &&
-      activeCommand.status !== "queued" &&
-      activeCommand.leaseExpiresAt !== null &&
-      activeCommand.leaseExpiresAt >= now(),
+    activeCommand.status !== "queued" &&
+    activeCommand.leaseExpiresAt !== null &&
+    activeCommand.leaseExpiresAt >= now(),
   );
   if (hasFreshResumableLease) {
     return { status: "resuming_active_command" as const };
@@ -340,22 +401,23 @@ async function startLocalRunner() {
     runnerToken,
     runnerId,
   });
-  try {
-    await verifyIdleDemoWorkloadReady(client, workload);
-  } catch (error) {
-    try {
-      await client.close();
-    } catch {
-      // Preserve the readiness error.
-    }
-    throw error;
-  }
+  const environmentRestorer = createEnvironmentRestorer({
+    client,
+    workload,
+  });
   const orchestrator = createRecoveryOrchestrator({
     state: client,
     workload,
     investigator: createCodexInvestigator(),
   });
-  const runtime = await startRunnerLoop({ client, orchestrator });
+  const runtime = await startRunnerLoop({
+    client,
+    orchestrator,
+    environmentRestorer,
+    verifyStartupReady: async () => {
+      await verifyIdleDemoWorkloadReady(client, workload);
+    },
+  });
   console.log("Autonomous recovery runner is connected and watching.");
 
   let shuttingDown = false;

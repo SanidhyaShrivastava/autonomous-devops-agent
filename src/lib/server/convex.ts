@@ -12,6 +12,7 @@ type RequestDemoRunResult =
         | "cooldown"
         | "daily_cap"
         | "runner_offline"
+        | "environment_recovery_pending"
         | "disabled";
     };
 
@@ -56,6 +57,8 @@ export async function requestDemoRun(args: {
         return { status: "daily_cap" };
       case "RUNNER_OFFLINE":
         return { status: "runner_offline" };
+      case "ENVIRONMENT_RECOVERY_PENDING":
+        return { status: "environment_recovery_pending" };
       case "DEMO_DISABLED":
         return { status: "disabled" };
       default:
