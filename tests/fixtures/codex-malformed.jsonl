@@ -1,0 +1,5 @@
+{"type":"thread.started","thread_id":"synthetic-thread-malformed"}
+{"type":"turn.started"}
+this is not a JSON event
+{"type":"item.completed","item":{"id":"synthetic-item-malformed","type":"agent_message","text":"{\"incidentCategory\":\"service_stopped\",\"summary\":\"Incomplete output\"}"}}
+{"type":"turn.completed","usage":{"input_tokens":80,"cached_input_tokens":0,"output_tokens":12}}

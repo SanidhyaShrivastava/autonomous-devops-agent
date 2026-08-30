@@ -1,0 +1,4 @@
+{"type":"thread.started","thread_id":"synthetic-thread-success"}
+{"type":"turn.started"}
+{"type":"item.completed","item":{"id":"synthetic-item-1","type":"agent_message","text":"{\"incidentCategory\":\"service_stopped\",\"summary\":\"The fixed demo service is stopped.\",\"evidence\":[\"health.healthy\",\"container.status\"],\"confidence\":0.96,\"proposedActionId\":\"restart_demo_service\",\"requiresHuman\":false}"}}
+{"type":"turn.completed","usage":{"input_tokens":120,"cached_input_tokens":20,"output_tokens":45}}

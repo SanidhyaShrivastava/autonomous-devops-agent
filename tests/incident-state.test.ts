@@ -129,10 +129,12 @@ describe("execution idempotency", () => {
 
 describe("bounded diagnosis contract", () => {
   const validDiagnosis = {
+    incidentCategory: "service_stopped",
     summary: "The fixed demo service is stopped.",
     evidence: ["Container status is exited."],
     confidence: 0.9,
-    action: "restart_demo_service",
+    proposedActionId: "restart_demo_service",
+    requiresHuman: false,
   };
 
   it("accepts a bounded structured diagnosis", () => {
@@ -143,10 +145,10 @@ describe("bounded diagnosis contract", () => {
     ["overlong evidence", { evidence: ["x".repeat(501)] }],
     [
       "too many evidence items",
-      { evidence: Array.from({ length: 11 }, () => "safe evidence") },
+      { evidence: Array.from({ length: 6 }, () => "safe evidence") },
     ],
     ["non-finite confidence", { confidence: Number.POSITIVE_INFINITY }],
-    ["unknown action", { action: "run_shell_command" }],
+    ["unknown action", { proposedActionId: "run_shell_command" }],
     ["extra command field", { command: "docker start anything" }],
   ])("rejects %s", (_name, override) => {
     expect(

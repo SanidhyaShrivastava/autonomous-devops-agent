@@ -1,0 +1,48 @@
+{
+  "$schema": "http://json-schema.org/draft-07/schema#",
+  "title": "Bounded incident diagnosis",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "incidentCategory",
+    "summary",
+    "evidence",
+    "confidence",
+    "proposedActionId",
+    "requiresHuman"
+  ],
+  "properties": {
+    "incidentCategory": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 120
+    },
+    "summary": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 1000
+    },
+    "evidence": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 5,
+      "items": {
+        "type": "string",
+        "minLength": 1,
+        "maxLength": 500
+      }
+    },
+    "confidence": {
+      "type": "number",
+      "minimum": 0,
+      "maximum": 1
+    },
+    "proposedActionId": {
+      "type": "string",
+      "enum": ["restart_demo_service", "no_action"]
+    },
+    "requiresHuman": {
+      "type": "boolean"
+    }
+  }
+}

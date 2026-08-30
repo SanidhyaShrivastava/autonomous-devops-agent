@@ -55,10 +55,12 @@ const BoundedEvidenceSchema = z.string().trim().min(1).max(500);
 
 export const DiagnosisSchema = z
   .object({
+    incidentCategory: z.string().trim().min(1).max(120),
     summary: z.string().trim().min(1).max(1_000),
-    evidence: z.array(BoundedEvidenceSchema).min(1).max(10),
+    evidence: z.array(BoundedEvidenceSchema).min(1).max(5),
     confidence: z.number().finite().min(0).max(1),
-    action: ActionIdSchema,
+    proposedActionId: ActionIdSchema,
+    requiresHuman: z.boolean(),
   })
   .strict();
 
