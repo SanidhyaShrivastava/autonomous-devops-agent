@@ -181,6 +181,16 @@ export const getPublicState = query({
             finalHealth: displayedIncident.finalHealth
               ? sanitizeForPersistence(displayedIncident.finalHealth, 64)
               : null,
+            incidentCategory: displayedIncident.incidentCategory
+              ? sanitizeForPersistence(
+                  displayedIncident.incidentCategory,
+                  120,
+                )
+              : null,
+            diagnosisEvidence:
+              displayedIncident.diagnosisEvidence?.map((evidence) =>
+                sanitizeForPersistence(evidence, 500),
+              ) ?? null,
             diagnosisSummary: displayedIncident.diagnosisSummary
               ? sanitizeForPersistence(
                   displayedIncident.diagnosisSummary,
@@ -188,6 +198,7 @@ export const getPublicState = query({
                 )
               : null,
             confidence: displayedIncident.confidence ?? null,
+            requiresHuman: displayedIncident.requiresHuman ?? null,
             proposedActionId: displayedIncident.proposedActionId ?? null,
             startedAt: displayedIncident.startedAt,
             finishedAt: displayedIncident.finishedAt ?? null,

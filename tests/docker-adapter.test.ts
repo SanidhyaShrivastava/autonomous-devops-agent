@@ -256,6 +256,24 @@ describe("DockerAdapter safe evidence", () => {
 });
 
 describe("DockerAdapter independent health verification", () => {
+  it("stops an in-flight verification when the runner is cancelled", async () => {
+    const healthFetch: HealthFetch = async (_url, init) =>
+      await new Promise((_resolve, reject) => {
+        init.signal?.addEventListener(
+          "abort",
+          () => reject(new DOMException("cancelled", "AbortError")),
+          { once: true },
+        );
+      });
+    const adapter = new DockerAdapter({ fetch: healthFetch });
+    const controller = new AbortController();
+
+    const verification = adapter.verifyFreshHealth(0, controller.signal);
+    controller.abort();
+
+    await expect(verification).rejects.toMatchObject({ name: "AbortError" });
+  });
+
   it("uses only the fixed loopback URL and rejects the wrong service identity", async () => {
     const calls: Array<{ url: string; init: RequestInit }> = [];
     const healthFetch: HealthFetch = async (url, init) => {

@@ -1061,4 +1061,72 @@ describe("fixed local Codex process boundary", () => {
     });
     expect(harness.rm).toHaveBeenCalledOnce();
   });
+
+  it("terminates the isolated Codex process when the runner is cancelled", async () => {
+    vi.useFakeTimers();
+    const harness = createTestHarness({
+      hang: true,
+      closeOnSignal: "SIGTERM",
+    });
+    const controller = new AbortController();
+
+    const investigation = harness.investigator.investigate(
+      FIXED_EVIDENCE,
+      controller.signal,
+    );
+    await flushMicrotasksUntil(() => harness.spawnCalls.length === 1);
+    controller.abort();
+    const result = await investigation;
+
+    expectNoExecutableAction(result);
+    expect(result).toMatchObject({
+      status: "investigation_failed",
+      failureReason: "process_failed",
+    });
+    expect(harness.spawnCalls[0]?.child.killCalls).toEqual(["SIGTERM"]);
+    expect(harness.rm).toHaveBeenCalledOnce();
+  });
+
+  it("does not create files or spawn Codex when already cancelled", async () => {
+    const harness = createTestHarness({ hang: true });
+    const controller = new AbortController();
+    controller.abort();
+
+    const result = await harness.investigator.investigate(
+      FIXED_EVIDENCE,
+      controller.signal,
+    );
+
+    expectNoExecutableAction(result);
+    expect(result).toMatchObject({
+      status: "investigation_failed",
+      failureReason: "process_failed",
+    });
+    expect(harness.mkdtemp).not.toHaveBeenCalled();
+    expect(harness.spawnCalls).toHaveLength(0);
+  });
+
+  it("removes its cancellation listener after a normal process exit", async () => {
+    const harness = createTestHarness({ stdout: SUCCESS_JSONL });
+    const controller = new AbortController();
+    const addListener = vi.spyOn(controller.signal, "addEventListener");
+    const removeListener = vi.spyOn(
+      controller.signal,
+      "removeEventListener",
+    );
+
+    await harness.investigator.investigate(
+      FIXED_EVIDENCE,
+      controller.signal,
+    );
+
+    const abortRegistration = addListener.mock.calls.find(
+      ([eventName]) => eventName === "abort",
+    );
+    expect(abortRegistration).toBeDefined();
+    expect(removeListener).toHaveBeenCalledWith(
+      "abort",
+      abortRegistration?.[1],
+    );
+  });
 });

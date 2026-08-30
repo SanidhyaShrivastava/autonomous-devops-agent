@@ -295,8 +295,14 @@ export class DockerAdapter {
     };
   }
 
-  async checkHealthOnce(): Promise<HealthEvidence> {
+  async checkHealthOnce(signal?: AbortSignal): Promise<HealthEvidence> {
     const requestStartedAt = this.now();
+    const requestSignal = signal
+      ? AbortSignal.any([
+          signal,
+          AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
+        ])
+      : AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS);
 
     try {
       const response = await this.healthFetch(DEMO_HEALTH_URL, {
@@ -304,7 +310,7 @@ export class DockerAdapter {
         cache: "no-store",
         redirect: "error",
         headers: { accept: "application/json" },
-        signal: AbortSignal.timeout(HEALTH_REQUEST_TIMEOUT_MS),
+        signal: requestSignal,
       });
       const payload = await response.json().catch(() => null);
       const parsed = HealthPayloadSchema.safeParse(payload);
@@ -332,12 +338,17 @@ export class DockerAdapter {
     }
   }
 
-  async verifyFreshHealth(notBefore: number): Promise<HealthEvidence> {
+  async verifyFreshHealth(
+    notBefore: number,
+    signal?: AbortSignal,
+  ): Promise<HealthEvidence> {
+    signal?.throwIfAborted();
     const deadline = this.now() + HEALTH_VERIFY_TIMEOUT_MS;
     let lastEvidence: HealthEvidence | null = null;
 
     for (let attempt = 1; attempt <= MAX_HEALTH_ATTEMPTS; attempt += 1) {
-      const evidence = await this.checkHealthOnce();
+      const evidence = await this.checkHealthOnce(signal);
+      signal?.throwIfAborted();
       const fresh = evidence.requestStartedAt >= notBefore;
       lastEvidence = {
         ...evidence,
@@ -350,6 +361,7 @@ export class DockerAdapter {
       }
 
       await this.sleep(HEALTH_RETRY_INTERVAL_MS);
+      signal?.throwIfAborted();
     }
 
     return (

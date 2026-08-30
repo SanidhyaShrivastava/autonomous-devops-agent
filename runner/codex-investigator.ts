@@ -173,7 +173,10 @@ export type InvestigationResult =
   | FailedInvestigation;
 
 export interface CodexInvestigator {
-  investigate(evidence: InvestigationEvidence): Promise<InvestigationResult>;
+  investigate(
+    evidence: InvestigationEvidence,
+    signal?: AbortSignal,
+  ): Promise<InvestigationResult>;
 }
 
 interface SpawnOptions {
@@ -482,8 +485,20 @@ function runCodexProcess(
   args: readonly string[],
   options: SpawnOptions,
   prompt: string,
+  signal?: AbortSignal,
 ): Promise<ProcessResult> {
   return new Promise((resolve) => {
+    if (signal?.aborted) {
+      resolve({
+        exitCode: null,
+        stdout: "",
+        timedOut: false,
+        outputOverflowed: false,
+        processError: true,
+      });
+      return;
+    }
+
     let child: CodexChildProcess;
     try {
       child = spawn(CODEX_EXECUTABLE, args, options);
@@ -505,6 +520,10 @@ function runCodexProcess(
     let settled = false;
     let shutdownStarted = false;
     let shutdownProcessError = false;
+    const lifecycle: {
+      timeout?: ReturnType<typeof setTimeout>;
+      abortListener?: () => void;
+    } = {};
     let forceKillTimeout: ReturnType<typeof setTimeout> | undefined;
     let finalizationTimeout: ReturnType<typeof setTimeout> | undefined;
 
@@ -516,12 +535,17 @@ function runCodexProcess(
         return;
       }
       settled = true;
-      clearTimeout(timeout);
+      if (lifecycle.timeout !== undefined) {
+        clearTimeout(lifecycle.timeout);
+      }
       if (forceKillTimeout !== undefined) {
         clearTimeout(forceKillTimeout);
       }
       if (finalizationTimeout !== undefined) {
         clearTimeout(finalizationTimeout);
+      }
+      if (lifecycle.abortListener) {
+        signal?.removeEventListener("abort", lifecycle.abortListener);
       }
       resolve({
         exitCode,
@@ -545,7 +569,7 @@ function runCodexProcess(
     };
 
     const beginShutdown = (
-      reason: "timeout" | "output_overflow" | "process_error",
+      reason: "timeout" | "output_overflow" | "process_error" | "cancelled",
     ) => {
       if (shutdownStarted || settled) {
         return;
@@ -553,8 +577,11 @@ function runCodexProcess(
       shutdownStarted = true;
       timedOut = reason === "timeout";
       outputOverflowed ||= reason === "output_overflow";
-      shutdownProcessError = reason === "process_error";
-      clearTimeout(timeout);
+      shutdownProcessError =
+        reason === "process_error" || reason === "cancelled";
+      if (lifecycle.timeout !== undefined) {
+        clearTimeout(lifecycle.timeout);
+      }
 
       try {
         signalProcessTree("SIGTERM");
@@ -578,7 +605,7 @@ function runCodexProcess(
       }, CODEX_SHUTDOWN_GRACE_MS);
     };
 
-    const timeout = setTimeout(
+    lifecycle.timeout = setTimeout(
       () => beginShutdown("timeout"),
       CODEX_TIMEOUT_MS,
     );
@@ -609,6 +636,14 @@ function runCodexProcess(
     );
 
     child.stdin.once("error", () => beginShutdown("process_error"));
+
+    lifecycle.abortListener = () => beginShutdown("cancelled");
+    signal?.addEventListener("abort", lifecycle.abortListener, {
+      once: true,
+    });
+    if (signal?.aborted) {
+      lifecycle.abortListener();
+    }
 
     try {
       child.stdin.end(prompt);
@@ -773,8 +808,12 @@ export function createCodexInvestigator(
     DEFAULT_TEMPORARY_DIRECTORY_PREFIX;
 
   return {
-    async investigate(rawEvidence): Promise<InvestigationResult> {
+    async investigate(rawEvidence, signal): Promise<InvestigationResult> {
       const startedAt = now();
+      if (signal?.aborted) {
+        const finishedAt = now();
+        return failureResult(startedAt, finishedAt, "process_failed");
+      }
       const evidence = InvestigationEvidenceSchema.safeParse(rawEvidence);
       if (!evidence.success) {
         const finishedAt = now();
@@ -847,6 +886,7 @@ export function createCodexInvestigator(
             stdio: ["pipe", "pipe", "pipe"],
           },
           buildPrompt(citations),
+          signal,
         );
         const finishedAt = now();
 

@@ -79,6 +79,9 @@ const TERMINAL_STATES = new Set<IncidentPhase>([
   "investigation_failed",
 ]);
 
+const DEMO_RECOVERY_COMMAND_LABEL =
+  "docker start fixed demo service" as const;
+
 const ALLOWED_NEXT_PHASES: Readonly<
   Record<IncidentPhase, readonly IncidentPhase[]>
 > = {
@@ -121,6 +124,18 @@ function requireFiniteTimestamp(value: number, label: string) {
     rejectWithCode(`INVALID_${label.toUpperCase()}`);
   }
   return value;
+}
+
+function sanitizeDiagnosisEvidence(values: readonly string[]) {
+  if (values.length < 1 || values.length > 5) {
+    rejectWithCode("INVALID_DIAGNOSIS_EVIDENCE");
+  }
+  return values.map((value) =>
+    sanitizeForPersistence(
+      requireBoundedText(value, "diagnosis_evidence", 500),
+      500,
+    ),
+  );
 }
 
 function requireClaimedCommand(
@@ -363,6 +378,12 @@ export const getActiveDemoCommand = query({
     if (recovery && recovery.runnerId !== args.runnerId) {
       rejectWithCode("RUNNER_MISMATCH");
     }
+    const existingSteps = await ctx.db
+      .query("steps")
+      .withIndex("by_demo_command_sequence", (q) =>
+        q.eq("demoCommandId", command._id),
+      )
+      .take(100);
 
     return {
       _id: command._id,
@@ -379,8 +400,11 @@ export const getActiveDemoCommand = query({
             _id: incident._id,
             currentPhase: incident.currentPhase,
             stateVersion: incident.stateVersion,
+            incidentCategory: incident.incidentCategory ?? null,
+            diagnosisEvidence: incident.diagnosisEvidence ?? null,
             diagnosisSummary: incident.diagnosisSummary ?? null,
             confidence: incident.confidence ?? null,
+            requiresHuman: incident.requiresHuman ?? null,
             proposedActionId: incident.proposedActionId ?? null,
           }
         : null,
@@ -391,8 +415,25 @@ export const getActiveDemoCommand = query({
             status: recovery.status,
             stateVersion: recovery.stateVersion,
             executionNonce: recovery.executionNonce,
+            completedAt: recovery.completedAt ?? null,
+            executionEvidence:
+              recovery.executionCommandLabel !== undefined &&
+              recovery.executionExitCode !== undefined &&
+              recovery.executionStartedAt !== undefined &&
+              recovery.executionFinishedAt !== undefined &&
+              recovery.executionLatencyMs !== undefined &&
+              recovery.executionEvidenceNonce === recovery.executionNonce
+                ? {
+                    commandLabel: recovery.executionCommandLabel,
+                    exitCode: recovery.executionExitCode,
+                    startedAt: recovery.executionStartedAt,
+                    finishedAt: recovery.executionFinishedAt,
+                    latencyMs: recovery.executionLatencyMs,
+                  }
+                : null,
           }
         : null,
+      stepNonces: existingSteps.map((step) => step.stepNonce),
     };
   },
 });
@@ -420,6 +461,75 @@ export const renewLease = mutation({
     const leaseExpiresAt = now + CLAIM_LEASE_MS;
     await ctx.db.patch(command._id, { leaseExpiresAt });
     return { stateVersion: command.stateVersion, leaseExpiresAt };
+  },
+});
+
+export const failDemoCommand = mutation({
+  args: {
+    runnerToken: v.string(),
+    runnerId: v.string(),
+    demoCommandId: v.id("demoCommands"),
+    expectedStateVersion: v.number(),
+    terminalReason: v.string(),
+  },
+  handler: async (ctx, args) => {
+    requireRunnerToken(args.runnerToken);
+    requireDemoRunner(args.runnerId);
+
+    const now = Date.now();
+    const command = await requireCommand(ctx, args.demoCommandId);
+    requireClaimedCommand(
+      command,
+      args.runnerId,
+      args.expectedStateVersion,
+      now,
+      ["claimed", "reset_applied", "failure_confirmed"],
+    );
+    const control = await getControl(ctx);
+    if (
+      control?.activeDemoCommandId !== command._id ||
+      control.activeIncidentId
+    ) {
+      rejectWithCode("INCIDENT_ALREADY_CREATED");
+    }
+
+    const terminalReason = sanitizeForPersistence(
+      requireBoundedText(args.terminalReason, "terminal_reason", 500),
+      500,
+    );
+    const latestStep = await ctx.db
+      .query("steps")
+      .withIndex("by_demo_command_sequence", (q) =>
+        q.eq("demoCommandId", command._id),
+      )
+      .order("desc")
+      .first();
+    await ctx.db.insert("steps", {
+      demoCommandId: command._id,
+      sequence: (latestStep?.sequence ?? 0) + 1,
+      stepNonce: `system_command_failure_${command._id}`,
+      role: "incident_manager",
+      kind: "command_failed",
+      status: "failed",
+      errorSummary: terminalReason,
+      startedAt: now,
+      finishedAt: now,
+      latencyMs: 0,
+      costStatus: "not_reported",
+    });
+
+    const stateVersion = command.stateVersion + 1;
+    await ctx.db.patch(command._id, {
+      status: "failed",
+      finishedAt: now,
+      leaseExpiresAt: undefined,
+      stateVersion,
+    });
+    await ctx.db.patch(control._id, {
+      activeDemoCommandId: undefined,
+      activeIncidentId: undefined,
+    });
+    return { status: "failed" as const, stateVersion };
   },
 });
 
@@ -846,10 +956,13 @@ export const createRecoveryCommand = mutation({
     }
     if (
       !incident.diagnosisSummary?.trim() ||
+      !incident.incidentCategory?.trim() ||
+      !incident.diagnosisEvidence?.length ||
       !Number.isFinite(incident.confidence) ||
       incident.confidence === undefined ||
       incident.confidence < MINIMUM_AUTONOMOUS_CONFIDENCE ||
       incident.confidence > 1 ||
+      incident.requiresHuman !== false ||
       incident.proposedActionId !== DEMO_ACTION_ID ||
       args.actionId !== DEMO_ACTION_ID
     ) {
@@ -918,8 +1031,20 @@ export const updateIncidentPhase = mutation({
     recoveryCommandId: v.optional(v.id("recoveryCommands")),
     expectedRecoveryStateVersion: v.optional(v.number()),
     executionNonce: v.optional(v.string()),
+    executionEvidence: v.optional(
+      v.object({
+        commandLabel: v.string(),
+        exitCode: v.number(),
+        startedAt: v.number(),
+        finishedAt: v.number(),
+        latencyMs: v.number(),
+      }),
+    ),
+    incidentCategory: v.optional(v.string()),
+    diagnosisEvidence: v.optional(v.array(v.string())),
     diagnosisSummary: v.optional(v.string()),
     confidence: v.optional(v.number()),
+    requiresHuman: v.optional(v.boolean()),
     proposedActionId: v.optional(
       v.union(v.literal("restart_demo_service"), v.literal("no_action")),
     ),
@@ -961,8 +1086,11 @@ export const updateIncidentPhase = mutation({
       rejectWithCode("INVALID_STATE");
     }
     const changesPolicyDecision =
+      args.incidentCategory !== undefined ||
+      args.diagnosisEvidence !== undefined ||
       args.diagnosisSummary !== undefined ||
       args.confidence !== undefined ||
+      args.requiresHuman !== undefined ||
       args.proposedActionId !== undefined;
     if (
       changesPolicyDecision &&
@@ -977,6 +1105,12 @@ export const updateIncidentPhase = mutation({
     }
     if (!ALLOWED_NEXT_PHASES[incident.currentPhase].includes(args.nextPhase)) {
       rejectWithCode("INVALID_TRANSITION");
+    }
+    if (
+      args.executionEvidence !== undefined &&
+      args.nextPhase !== "verifying"
+    ) {
+      rejectWithCode("UNEXPECTED_EXECUTION_EVIDENCE");
     }
 
     if (args.confidence !== undefined) {
@@ -1015,6 +1149,9 @@ export const updateIncidentPhase = mutation({
       }
 
       if (args.nextPhase === "executing") {
+        if (args.executionEvidence !== undefined) {
+          rejectWithCode("UNEXPECTED_EXECUTION_EVIDENCE");
+        }
         if (recovery.status !== "allowed") {
           rejectWithCode("INVALID_RECOVERY_STATE");
         }
@@ -1024,12 +1161,46 @@ export const updateIncidentPhase = mutation({
           stateVersion: recovery.stateVersion + 1,
         });
       } else {
+        const executionEvidence = args.executionEvidence;
+        if (!executionEvidence) {
+          rejectWithCode("EXECUTION_EVIDENCE_REQUIRED");
+        }
         if (recovery.status !== "executing") {
           rejectWithCode("INVALID_RECOVERY_STATE");
+        }
+        const executionStartedAt = requireFiniteTimestamp(
+          executionEvidence.startedAt,
+          "execution_started_at",
+        );
+        const executionFinishedAt = requireFiniteTimestamp(
+          executionEvidence.finishedAt,
+          "execution_finished_at",
+        );
+        const executionLatencyMs = requireNonNegativeInteger(
+          executionEvidence.latencyMs,
+          "execution_latency_ms",
+        );
+        if (
+          executionEvidence.commandLabel !== DEMO_RECOVERY_COMMAND_LABEL ||
+          executionEvidence.exitCode !== 0 ||
+          recovery.claimedAt === undefined ||
+          executionStartedAt < recovery.claimedAt ||
+          executionFinishedAt < executionStartedAt ||
+          executionLatencyMs !==
+            Math.floor(executionFinishedAt - executionStartedAt) ||
+          executionFinishedAt > now + MAX_CLOCK_SKEW_MS
+        ) {
+          rejectWithCode("INVALID_EXECUTION_EVIDENCE");
         }
         await ctx.db.patch(recovery._id, {
           status: "executed",
           completedAt: now,
+          executionCommandLabel: DEMO_RECOVERY_COMMAND_LABEL,
+          executionExitCode: 0,
+          executionStartedAt,
+          executionFinishedAt,
+          executionLatencyMs,
+          executionEvidenceNonce: executionNonce,
           stateVersion: recovery.stateVersion + 1,
         });
       }
@@ -1054,6 +1225,20 @@ export const updateIncidentPhase = mutation({
     await ctx.db.patch(incident._id, {
       currentPhase: args.nextPhase,
       stateVersion,
+      incidentCategory: args.incidentCategory
+        ? sanitizeForPersistence(
+            requireBoundedText(
+              args.incidentCategory,
+              "incident_category",
+              120,
+            ),
+            120,
+          )
+        : incident.incidentCategory,
+      diagnosisEvidence:
+        args.diagnosisEvidence === undefined
+          ? incident.diagnosisEvidence
+          : sanitizeDiagnosisEvidence(args.diagnosisEvidence),
       diagnosisSummary: args.diagnosisSummary
         ? sanitizeForPersistence(
             requireBoundedText(
@@ -1065,6 +1250,7 @@ export const updateIncidentPhase = mutation({
           )
         : incident.diagnosisSummary,
       confidence: args.confidence ?? incident.confidence,
+      requiresHuman: args.requiresHuman ?? incident.requiresHuman,
       proposedActionId: args.proposedActionId ?? incident.proposedActionId,
       reportedInputTokens:
         reportedInputTokens ?? incident.reportedInputTokens,
@@ -1082,6 +1268,8 @@ export const updateIncidentPhase = mutation({
         args.expectedRecoveryStateVersion === undefined
           ? undefined
           : args.expectedRecoveryStateVersion + 1,
+      recoveryCompletedAt:
+        args.nextPhase === "verifying" ? now : undefined,
       leaseExpiresAt: now + CLAIM_LEASE_MS,
     };
   },
@@ -1206,6 +1394,12 @@ export const completeIncident = mutation({
         !recovery ||
         recovery.status !== "executed" ||
         recovery.completedAt === undefined ||
+        recovery.executionCommandLabel !== DEMO_RECOVERY_COMMAND_LABEL ||
+        recovery.executionExitCode !== 0 ||
+        recovery.executionStartedAt === undefined ||
+        recovery.executionFinishedAt === undefined ||
+        recovery.executionLatencyMs === undefined ||
+        recovery.executionEvidenceNonce !== recovery.executionNonce ||
         !verification ||
         args.finalHealth !== DEMO_HEALTHY_STATUS ||
         verification.service !== DEMO_SERVICE_IDENTITY ||

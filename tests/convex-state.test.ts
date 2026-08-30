@@ -27,6 +27,9 @@ const claimDemoCommand = makeFunctionReference<"mutation">(
   "runner:claimDemoCommand",
 );
 const renewLease = makeFunctionReference<"mutation">("runner:renewLease");
+const failDemoCommand = makeFunctionReference<"mutation">(
+  "runner:failDemoCommand",
+);
 const markResetApplied = makeFunctionReference<"mutation">(
   "runner:markResetApplied",
 );
@@ -56,6 +59,7 @@ type DemoCommandResult = {
 type VersionResult = {
   stateVersion: number;
   leaseExpiresAt?: number;
+  recoveryCompletedAt?: number;
 };
 
 type IncidentResult = {
@@ -225,7 +229,14 @@ async function moveIncidentToInvestigating(t: ConvexHarness) {
   return { ...created, incidentStateVersion: investigating.stateVersion };
 }
 
-async function moveIncidentToPolicyCheck(t: ConvexHarness) {
+async function moveIncidentToPolicyCheck(
+  t: ConvexHarness,
+  decision: {
+    incidentCategory?: string;
+    requiresHuman?: boolean;
+    proposedActionId?: "restart_demo_service" | "no_action";
+  } = {},
+) {
   const investigatingRun = await moveIncidentToInvestigating(t);
   const managerReview = (await t.mutation(updateIncidentPhase, {
     runnerToken: RUNNER_TOKEN,
@@ -236,9 +247,16 @@ async function moveIncidentToPolicyCheck(t: ConvexHarness) {
     nextPhase: "manager_review",
     expectedStateVersion: investigatingRun.incidentStateVersion,
     expectedCommandStateVersion: investigatingRun.commandStateVersion,
+    incidentCategory: decision.incidentCategory ?? "service_stopped",
+    diagnosisEvidence: [
+      "Health check healthy: false",
+      "Container status: exited",
+    ],
     diagnosisSummary: "The fixed demo service is stopped.",
     confidence: 0.91,
-    proposedActionId: "restart_demo_service",
+    proposedActionId:
+      decision.proposedActionId ?? "restart_demo_service",
+    requiresHuman: decision.requiresHuman ?? false,
   })) as VersionResult;
   const policyCheck = (await t.mutation(updateIncidentPhase, {
     runnerToken: RUNNER_TOKEN,
@@ -308,6 +326,13 @@ async function moveRecoveryToVerifying(
     recoveryCommandId: ready.recovery.recoveryCommandId,
     expectedRecoveryStateVersion: 1,
     executionNonce,
+    executionEvidence: {
+      commandLabel: "docker start fixed demo service",
+      exitCode: 0,
+      startedAt: BASE_TIME,
+      finishedAt: BASE_TIME + 100,
+      latencyMs: 100,
+    },
   })) as VersionResult;
 
   return { ...ready, verifying, recoveryStateVersion: 2 };
@@ -866,6 +891,12 @@ describe("runner resume, retry, and lease cleanup", () => {
         _id: ready.incident.incidentId,
         currentPhase: "policy_check",
         stateVersion: ready.incidentStateVersion,
+        incidentCategory: "service_stopped",
+        diagnosisEvidence: [
+          "Health check healthy: false",
+          "Container status: exited",
+        ],
+        requiresHuman: false,
       },
       recovery: {
         _id: ready.recovery.recoveryCommandId,
@@ -874,6 +905,77 @@ describe("runner resume, retry, and lease cleanup", () => {
         actionId: "restart_demo_service",
         executionNonce: "resume-recovery",
       },
+    });
+  });
+
+  it("returns existing step nonces so a restarted runner never replays a changed step", async () => {
+    const t = createHarness();
+    const ready = await moveIncidentToPolicyCheck(t);
+    await t.mutation(appendStep, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: ready.demoCommandId,
+      incidentId: ready.incident.incidentId,
+      expectedCommandStateVersion: ready.commandStateVersion,
+      expectedIncidentStateVersion: ready.incidentStateVersion,
+      stepNonce: "resume_safe_manager_step",
+      role: "incident_manager",
+      kind: "manager_evidence_review",
+      status: "succeeded",
+      sanitizedOutput: "Reviewed the persisted diagnosis.",
+      startedAt: BASE_TIME,
+      finishedAt: BASE_TIME + 5,
+      latencyMs: 5,
+      costStatus: "not_reported",
+    });
+
+    await expect(
+      t.query(getActiveDemoCommand, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toMatchObject({
+      stepNonces: ["resume_safe_manager_step"],
+    });
+  });
+
+  it("fails and releases a claimed pre-incident command immediately", async () => {
+    const t = createHarness();
+    const { demoCommandId, claimed } = await claimQueuedCommand(t);
+
+    await expect(
+      t.mutation(failDemoCommand, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        demoCommandId,
+        expectedStateVersion: claimed.stateVersion,
+        terminalReason: "failed_to_seed_disposable_service",
+      }),
+    ).resolves.toEqual({ status: "failed", stateVersion: 2 });
+
+    await expect(
+      t.query(getActiveDemoCommand, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toBeNull();
+    const control = await getControl(t);
+    expect(control).not.toHaveProperty("activeDemoCommandId");
+    expect(control).not.toHaveProperty("activeIncidentId");
+  });
+
+  it("returns the server recovery timestamp required for a fresh health request", async () => {
+    const t = createHarness();
+    const ready = await moveRecoveryToVerifying(t, "server-time-recovery");
+
+    expect(ready.verifying.recoveryCompletedAt).toBe(BASE_TIME + 1_000);
+    await expect(
+      t.query(getActiveDemoCommand, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toMatchObject({
+      recovery: { completedAt: BASE_TIME + 1_000 },
     });
   });
 
@@ -1049,6 +1151,75 @@ describe("runner resume, retry, and lease cleanup", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
+  });
+});
+
+describe("persisted diagnosis autonomy boundary", () => {
+  it("blocks recovery creation when the Investigator required a human", async () => {
+    const t = createHarness();
+    const ready = await moveIncidentToPolicyCheck(t, {
+      requiresHuman: true,
+    });
+
+    await expectErrorCode(
+      t.mutation(createRecoveryCommand, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        demoCommandId: ready.demoCommandId,
+        incidentId: ready.incident.incidentId,
+        expectedCommandStateVersion: ready.commandStateVersion,
+        expectedIncidentPhase: "policy_check",
+        expectedIncidentStateVersion: ready.incidentStateVersion,
+        actionId: "restart_demo_service",
+        executionNonce: "human-required-recovery",
+      }),
+      "POLICY_DENIED",
+    );
+  });
+
+  it("blocks recovery when no grounded diagnosis evidence was persisted", async () => {
+    const t = createHarness();
+    const investigatingRun = await moveIncidentToInvestigating(t);
+    const managerReview = (await t.mutation(updateIncidentPhase, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: investigatingRun.demoCommandId,
+      incidentId: investigatingRun.incident.incidentId,
+      expectedPhase: "investigating",
+      nextPhase: "manager_review",
+      expectedStateVersion: investigatingRun.incidentStateVersion,
+      expectedCommandStateVersion: investigatingRun.commandStateVersion,
+      incidentCategory: "service_stopped",
+      diagnosisSummary: "The fixed demo service is stopped.",
+      confidence: 0.91,
+      proposedActionId: "restart_demo_service",
+      requiresHuman: false,
+    })) as VersionResult;
+    const policyCheck = (await t.mutation(updateIncidentPhase, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: investigatingRun.demoCommandId,
+      incidentId: investigatingRun.incident.incidentId,
+      expectedPhase: "manager_review",
+      nextPhase: "policy_check",
+      expectedStateVersion: managerReview.stateVersion,
+      expectedCommandStateVersion: investigatingRun.commandStateVersion,
+    })) as VersionResult;
+
+    await expectErrorCode(
+      t.mutation(createRecoveryCommand, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        demoCommandId: investigatingRun.demoCommandId,
+        incidentId: investigatingRun.incident.incidentId,
+        expectedCommandStateVersion: investigatingRun.commandStateVersion,
+        expectedIncidentPhase: "policy_check",
+        expectedIncidentStateVersion: policyCheck.stateVersion,
+        actionId: "restart_demo_service",
+        executionNonce: "missing-evidence-recovery",
+      }),
+      "POLICY_DENIED",
+    );
   });
 });
 
@@ -1260,6 +1431,74 @@ describe("incident creation and ordered trace", () => {
 });
 
 describe("recovery state and completion", () => {
+  it("requires exact successful execution evidence before verification", async () => {
+    const t = createHarness();
+    const ready = await createAllowedRecovery(t, "evidence-required");
+    const executing = (await t.mutation(updateIncidentPhase, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: ready.demoCommandId,
+      incidentId: ready.incident.incidentId,
+      expectedPhase: "policy_check",
+      nextPhase: "executing",
+      expectedStateVersion: ready.incidentStateVersion,
+      expectedCommandStateVersion: ready.commandStateVersion,
+      recoveryCommandId: ready.recovery.recoveryCommandId,
+      expectedRecoveryStateVersion: ready.recovery.stateVersion,
+      executionNonce: ready.executionNonce,
+    })) as VersionResult;
+    const baseInput = {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: ready.demoCommandId,
+      incidentId: ready.incident.incidentId,
+      expectedPhase: "executing" as const,
+      nextPhase: "verifying" as const,
+      expectedStateVersion: executing.stateVersion,
+      expectedCommandStateVersion: ready.commandStateVersion,
+      recoveryCommandId: ready.recovery.recoveryCommandId,
+      expectedRecoveryStateVersion: 1,
+      executionNonce: ready.executionNonce,
+    };
+
+    await expectErrorCode(
+      t.mutation(updateIncidentPhase, baseInput),
+      "EXECUTION_EVIDENCE_REQUIRED",
+    );
+
+    for (const executionEvidence of [
+      {
+        commandLabel: "docker start another service",
+        exitCode: 0,
+        startedAt: BASE_TIME,
+        finishedAt: BASE_TIME + 100,
+        latencyMs: 100,
+      },
+      {
+        commandLabel: "docker start fixed demo service",
+        exitCode: 1,
+        startedAt: BASE_TIME,
+        finishedAt: BASE_TIME + 100,
+        latencyMs: 100,
+      },
+      {
+        commandLabel: "docker start fixed demo service",
+        exitCode: 0,
+        startedAt: BASE_TIME - 1,
+        finishedAt: BASE_TIME + 99,
+        latencyMs: 100,
+      },
+    ]) {
+      await expectErrorCode(
+        t.mutation(updateIncidentPhase, {
+          ...baseInput,
+          executionEvidence,
+        }),
+        "INVALID_EXECUTION_EVIDENCE",
+      );
+    }
+  });
+
   it("returns the same recovery for an identical retry and rejects a conflicting nonce", async () => {
     const t = createHarness();
     const ready = await moveIncidentToPolicyCheck(t);
@@ -1915,6 +2154,13 @@ describe("recovery state and completion", () => {
       recoveryCommandId: recovery.recoveryCommandId,
       expectedRecoveryStateVersion: 1,
       executionNonce: "complete-once",
+      executionEvidence: {
+        commandLabel: "docker start fixed demo service",
+        exitCode: 0,
+        startedAt: BASE_TIME,
+        finishedAt: BASE_TIME,
+        latencyMs: 0,
+      },
     })) as VersionResult;
 
     await t.mutation(completeIncident, {
