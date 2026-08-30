@@ -16,7 +16,7 @@ const geistMono = Geist_Mono({
 export const metadata: Metadata = {
   title: "Autonomous DevOps Agent · Live Recovery Console",
   description:
-    "Watch an AI operations agent investigate, safely recover, and verify one disposable Linux service failure.",
+    "Watch a policy-checked agent recover one disposable Linux service and verify fresh health in about 12 seconds.",
 };
 
 export default function RootLayout({ children }: LayoutProps<"/">) {

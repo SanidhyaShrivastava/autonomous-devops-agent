@@ -170,10 +170,10 @@ describe("public recovery dashboard", () => {
     expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
       "Waiting for runner",
     );
-    const button = screen.getByRole("button", { name: "Reset demo" });
+    const button = screen.getByRole("button", { name: "Run recovery demo" });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(
-      "Reset is unavailable because the Linux runner is offline.",
+      "The recovery demo is unavailable because the Linux runner is offline.",
     );
   });
 
@@ -187,7 +187,7 @@ describe("public recovery dashboard", () => {
     expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
       "Public demo disabled",
     );
-    expect(screen.queryByText("Ready for reset")).not.toBeInTheDocument();
+    expect(screen.queryByText("Ready to run")).not.toBeInTheDocument();
   });
 
   it("shows a ready state and keeps the native button keyboard focusable", () => {
@@ -198,9 +198,24 @@ describe("public recovery dashboard", () => {
     expect(screen.getByText("Runner online")).toBeInTheDocument();
     expect(screen.getByText("Service ready")).toBeInTheDocument();
     expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
-      "Ready for reset",
+      "Ready to run",
     );
-    const button = screen.getByRole("button", { name: "Reset demo" });
+    expect(
+      screen.getByRole("heading", {
+        level: 1,
+        name: "Recover one failed Linux service safely in about 12 seconds.",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/pass an allowlist policy check/),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/no human approval step in this staged demo/i),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText(/approved recovery action/i),
+    ).not.toBeInTheDocument();
+    const button = screen.getByRole("button", { name: "Run recovery demo" });
     button.focus();
     expect(button).toHaveFocus();
     expect(button).toHaveAttribute("type", "button");
@@ -220,7 +235,7 @@ describe("public recovery dashboard", () => {
     );
 
     render(<DemoDashboard />);
-    fireEvent.click(screen.getByRole("button", { name: "Reset demo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run recovery demo" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith("/api/demo/reset", {
@@ -228,7 +243,7 @@ describe("public recovery dashboard", () => {
       });
     });
     expect(
-      await screen.findByText("Reset accepted. Waiting for the runner."),
+      await screen.findByText("Recovery demo started. Waiting for the runner."),
     ).toHaveAttribute("aria-live", "polite");
   });
 
@@ -239,9 +254,9 @@ describe("public recovery dashboard", () => {
     fetchMock.mockResolvedValue(new Response(null, { status: 202 }));
 
     const view = render(<DemoDashboard />);
-    fireEvent.click(screen.getByRole("button", { name: "Reset demo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run recovery demo" }));
     expect(
-      await screen.findByText("Reset accepted. Waiting for the runner."),
+      await screen.findByText("Recovery demo started. Waiting for the runner."),
     ).toBeInTheDocument();
 
     currentState = publicState({
@@ -256,7 +271,7 @@ describe("public recovery dashboard", () => {
     );
     expect(
       screen.getByRole("status", { name: "Demo status" }),
-    ).not.toHaveTextContent("Reset accepted");
+    ).not.toHaveTextContent("Recovery demo started");
   });
 
   it("shows the active phase in text and blocks a second run", () => {
@@ -273,10 +288,10 @@ describe("public recovery dashboard", () => {
     expect(screen.getByRole("status", { name: "Demo status" })).toHaveTextContent(
       "Investigating evidence",
     );
-    const button = screen.getByRole("button", { name: "Reset demo" });
+    const button = screen.getByRole("button", { name: "Run recovery demo" });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(
-      "Reset is unavailable while an incident is active.",
+      "The recovery demo is unavailable while an incident is active.",
     );
   });
 
@@ -290,8 +305,10 @@ describe("public recovery dashboard", () => {
 
     render(<DemoDashboard />);
 
-    expect(screen.getByText("Reset available in 13s")).toBeInTheDocument();
-    expect(screen.getByRole("button", { name: "Reset demo" })).toBeDisabled();
+    expect(screen.getByText("Demo available in 13s")).toBeInTheDocument();
+    expect(
+      screen.getByRole("button", { name: "Run recovery demo" }),
+    ).toBeDisabled();
   });
 
   it("stops the cooldown clock after the deadline", () => {
@@ -310,7 +327,9 @@ describe("public recovery dashboard", () => {
     act(() => vi.advanceTimersByTime(5_000));
 
     expect(convexMock.useQuery).toHaveBeenCalledTimes(callsAtExpiry);
-    expect(screen.getByRole("button", { name: "Reset demo" })).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Run recovery demo" }),
+    ).toBeEnabled();
   });
 
   it("marks the runner offline when a heartbeat becomes stale without a new query", () => {
@@ -326,10 +345,12 @@ describe("public recovery dashboard", () => {
 
     expect(screen.getByText("Runner offline")).toBeInTheDocument();
     expect(screen.getByText("Service unavailable")).toHaveClass("badge-neutral");
-    expect(screen.getByRole("button", { name: "Reset demo" })).toBeDisabled();
+    expect(
+      screen.getByRole("button", { name: "Run recovery demo" }),
+    ).toBeDisabled();
   });
 
-  it("renders a resolved trace and measured result without claiming zero cost", () => {
+  it("renders a concise resolved trace without public model, cost, or login metadata", () => {
     convexMock.useQuery.mockReturnValue(resolvedState());
 
     render(<DemoDashboard />);
@@ -340,11 +361,31 @@ describe("public recovery dashboard", () => {
     );
     expect(screen.getByText("12.4s")).toBeInTheDocument();
     expect(
-      screen.getByText("Cost unavailable with ChatGPT subscription login"),
-    ).toBeInTheDocument();
-    expect(screen.getByText("Input 6,967 · Output 93 tokens")).toBeInTheDocument();
+      screen.queryByText("Cost unavailable with ChatGPT subscription login"),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByText("Input 6,967 · Output 93 tokens"),
+    ).not.toBeInTheDocument();
     expect(screen.queryByText("$0")).not.toBeInTheDocument();
+    expect(screen.queryByText("$")).not.toBeInTheDocument();
+    expect(screen.getAllByText("Operation").length).toBeGreaterThan(0);
+    const evidenceControls = screen.getAllByText("View raw evidence");
+    expect(evidenceControls.length).toBeGreaterThan(0);
+    expect(
+      evidenceControls.every(
+        (control) => !control.closest("details")?.hasAttribute("open"),
+      ),
+    ).toBe(true);
     expect(screen.getByText("Verified healthy")).toHaveClass("rail-healthy");
+
+    const resolution = screen.getByRole("heading", {
+      name: "Resolution record",
+    });
+    const timeline = screen.getByRole("heading", { name: "Incident timeline" });
+    expect(
+      resolution.compareDocumentPosition(timeline) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
   });
 
   it("shows a needs-human outcome without implying an action ran", () => {
@@ -503,7 +544,7 @@ describe("public recovery dashboard", () => {
     expect(screen.getByText("Required")).toBeInTheDocument();
   });
 
-  it("does not invent a missing token count", () => {
+  it("does not expose partial model-usage metadata", () => {
     convexMock.useQuery.mockReturnValue(
       publicState({
         active: true,
@@ -520,7 +561,7 @@ describe("public recovery dashboard", () => {
 
     render(<DemoDashboard />);
 
-    expect(screen.getByText("Input 42 tokens")).toBeInTheDocument();
+    expect(screen.queryByText("Input 42 tokens")).not.toBeInTheDocument();
     expect(screen.queryByText(/Output 0/)).not.toBeInTheDocument();
   });
 

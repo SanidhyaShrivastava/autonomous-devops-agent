@@ -2301,8 +2301,25 @@ describe("redacted public state", () => {
             ? `token=should-not-leak ${"z".repeat(5_000)}`
             : `safe output ${index}`,
         startedAt: BASE_TIME + index,
+        ...(index === 109
+          ? {
+              reportedInputTokens: 8_201,
+              reportedOutputTokens: 92,
+              costStatus: "unavailable_chatgpt_subscription" as const,
+            }
+          : {}),
       });
     }
+
+    expect(await tableRows(t, "steps")).toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({
+          reportedInputTokens: 8_201,
+          reportedOutputTokens: 92,
+          costStatus: "unavailable_chatgpt_subscription",
+        }),
+      ]),
+    );
 
     const publicState = (await t.query(getPublicState, {})) as {
       incident: { staged: boolean } | null;
@@ -2331,5 +2348,9 @@ describe("redacted public state", () => {
     expect(serialized).not.toContain("runnerId");
     expect(serialized).not.toContain("rawPrompt");
     expect(serialized).not.toContain("modelEvents");
+    expect(serialized).not.toContain("reportedInputTokens");
+    expect(serialized).not.toContain("reportedOutputTokens");
+    expect(serialized).not.toContain("costStatus");
+    expect(serialized).not.toContain("unavailable_chatgpt_subscription");
   });
 });

@@ -15,7 +15,7 @@ import { DockerAdapter } from "../runner/docker-adapter";
 
 const NETWORK_TIMEOUT_MS = 10_000;
 const PUBLIC_APP_MARKER =
-  "An AI operations agent that investigates a failed Linux service, performs one approved recovery action, and verifies the result.";
+  "Recover one failed Linux service safely in about 12 seconds.";
 
 function requiredEnvironment(name: "CONVEX_URL" | "PUBLIC_APP_URL") {
   const value = process.env[name]?.trim();

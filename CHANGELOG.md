@@ -10,3 +10,4 @@
 - A recovery run can now turn bounded failed-health, container-state, and sanitized-log evidence into one strict diagnosis while keeping ChatGPT auth, host files, and executable authority outside the model's reach.
 - A visitor can now inspect live runner status, recovery evidence, and measured verification results on one responsive screen.
 - A visitor can now trigger one disposable Linux-service failure and watch the agent investigate, restart, independently verify, and persist the real recovery trace.
+- A visitor can now see the verified outcome before collapsed raw evidence, with truthful policy and operation labels and no public model-login metadata.

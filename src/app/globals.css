@@ -139,6 +139,15 @@ button {
   text-wrap: balance;
 }
 
+.headline-summary {
+  max-width: 720px;
+  margin: 18px 0 0;
+  color: var(--telemetry-soft);
+  font-size: 15px;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
 .safety-line {
   display: flex;
   align-items: flex-start;
@@ -336,10 +345,15 @@ button {
 
 .evidence-layout {
   display: grid;
+  grid-template-areas: "timeline resolution";
   grid-template-columns: minmax(0, 1.55fr) minmax(340px, 0.75fr);
   align-items: start;
   gap: 16px;
   padding-top: 16px;
+}
+
+.timeline-panel {
+  grid-area: timeline;
 }
 
 .panel {
@@ -500,7 +514,7 @@ button {
   line-height: 1.45;
 }
 
-.command-line {
+.operation-line {
   display: flex;
   min-width: 0;
   align-items: flex-start;
@@ -515,9 +529,62 @@ button {
   line-height: 1.5;
 }
 
-.command-line code {
+.operation-label {
+  flex: 0 0 auto;
+  color: var(--telemetry-muted);
+  font-size: 8px;
+  font-weight: 700;
+  letter-spacing: 0.08em;
+  text-transform: uppercase;
+}
+
+.operation-line code {
   min-width: 0;
   overflow-wrap: anywhere;
+}
+
+.trace-evidence {
+  margin-top: 8px;
+  border: 1px solid var(--console-line);
+  background: #070a0f;
+}
+
+.trace-evidence summary {
+  display: flex;
+  min-height: 44px;
+  align-items: center;
+  justify-content: space-between;
+  padding: 10px;
+  color: var(--telemetry-muted);
+  cursor: pointer;
+  font-family: var(--font-evidence), monospace;
+  font-size: 9px;
+  font-weight: 650;
+  letter-spacing: 0.04em;
+  list-style: none;
+}
+
+.trace-evidence summary::-webkit-details-marker {
+  display: none;
+}
+
+.trace-evidence summary::after {
+  color: var(--signal-blue-strong);
+  content: "+";
+  font-size: 14px;
+}
+
+.trace-evidence[open] summary::after {
+  content: "−";
+}
+
+.trace-evidence summary:hover {
+  color: var(--telemetry-soft);
+}
+
+.trace-evidence summary:focus-visible {
+  outline: 2px solid var(--signal-blue-strong);
+  outline-offset: -2px;
 }
 
 .trace-output,
@@ -533,6 +600,12 @@ button {
   line-height: 1.55;
   overflow-wrap: anywhere;
   white-space: pre-wrap;
+}
+
+.trace-evidence .trace-output {
+  margin: 0;
+  border: 0;
+  border-top: 1px solid var(--console-line);
 }
 
 .trace-error {
@@ -587,6 +660,7 @@ button {
 }
 
 .resolution-panel {
+  grid-area: resolution;
   position: sticky;
   top: 16px;
 }
@@ -781,6 +855,9 @@ button {
   }
 
   .evidence-layout {
+    grid-template-areas:
+      "resolution"
+      "timeline";
     grid-template-columns: 1fr;
   }
 
@@ -807,6 +884,11 @@ button {
     margin-top: 10px;
     font-size: clamp(29px, 9vw, 38px);
     line-height: 1.05;
+  }
+
+  .headline-summary {
+    margin-top: 14px;
+    font-size: 13px;
   }
 
   .control-deck,

@@ -12,7 +12,7 @@ const PHASE_LABELS: Record<string, string> = {
   investigating: "Investigating evidence",
   manager_review: "Manager reviewing evidence",
   policy_check: "Checking recovery policy",
-  executing: "Executing approved recovery",
+  executing: "Executing policy-checked recovery",
   verifying: "Verifying fresh health",
   resolved: "Recovered successfully",
   needs_human: "Human decision required",
@@ -123,7 +123,7 @@ function resetFailureMessage(status: number) {
     case 409:
       return "A recovery run is already active.";
     case 429:
-      return "Reset is temporarily unavailable. Please wait for the cooldown.";
+      return "The recovery demo is temporarily unavailable. Please wait for the cooldown.";
     case 503:
       return "The Linux runner is unavailable right now.";
     default:
@@ -152,29 +152,29 @@ export function DemoDashboard() {
 
   const phaseLabel = !state
     ? "Loading live recovery state"
-    : state.incident
+      : state.incident
       ? (PHASE_LABELS[state.incident.currentPhase] ?? "Incident in progress")
       : !state.enabled
         ? "Public demo disabled"
         : state.active
-          ? "Runner claiming reset"
+          ? "Runner starting recovery"
           : !runnerOnline
             ? "Waiting for runner"
-            : "Ready for reset";
+            : "Ready to run";
 
   let disabledReason: string | null = null;
   if (state === undefined) {
-    disabledReason = "Reset is unavailable while live state is loading.";
+    disabledReason = "The recovery demo is unavailable while live state is loading.";
   } else if (isStarting) {
-    disabledReason = "Reset request is being sent.";
+    disabledReason = "The recovery demo is starting.";
   } else if (!state.enabled) {
-    disabledReason = "Reset is unavailable because the public demo is disabled.";
+    disabledReason = "The recovery demo is unavailable because the public demo is disabled.";
   } else if (!runnerOnline) {
-    disabledReason = "Reset is unavailable because the Linux runner is offline.";
+    disabledReason = "The recovery demo is unavailable because the Linux runner is offline.";
   } else if (state.active) {
-    disabledReason = "Reset is unavailable while an incident is active.";
+    disabledReason = "The recovery demo is unavailable while an incident is active.";
   } else if (cooldownRemainingMs > 0) {
-    disabledReason = `Reset is unavailable for ${Math.ceil(cooldownRemainingMs / 1_000)} more seconds.`;
+    disabledReason = `The recovery demo is unavailable for ${Math.ceil(cooldownRemainingMs / 1_000)} more seconds.`;
   }
 
   const requestReset = () => {
@@ -192,7 +192,7 @@ export function DemoDashboard() {
         }
 
         setRequestNotice({
-          message: "Reset accepted. Waiting for the runner.",
+          message: "Recovery demo started. Waiting for the runner.",
           stateKey: requestStateKey,
         });
       } catch {
@@ -256,16 +256,17 @@ export function DemoDashboard() {
 
           <div className="headline-block">
             <p className="section-kicker">One service · one safe recovery path</p>
-            <h1>
-              An AI operations agent that investigates a failed Linux service,
-              performs one approved recovery action, and verifies the result.
-            </h1>
+            <h1>Recover one failed Linux service safely in about 12 seconds.</h1>
+            <p className="headline-summary">
+              Watch the agent investigate the failure, pass an allowlist policy
+              check, restart the disposable service, and verify fresh health.
+            </p>
           </div>
 
           <p className="safety-line">
             <span aria-hidden="true">◆</span>
-            Disposable demo container · one allowlisted restart · no arbitrary
-            shell access
+            Disposable demo container · allowlisted and policy-checked restart ·
+            no arbitrary shell access · no human approval step in this staged demo
           </p>
         </div>
 
@@ -292,7 +293,7 @@ export function DemoDashboard() {
             disabled={disabledReason !== null}
             aria-describedby="reset-assistance"
           >
-            <span>{isStarting ? "Starting…" : "Reset demo"}</span>
+            <span>{isStarting ? "Starting…" : "Run recovery demo"}</span>
             <span aria-hidden="true">↗</span>
           </button>
 
@@ -306,7 +307,7 @@ export function DemoDashboard() {
             <strong>{phaseLabel}</strong>
             {cooldownRemainingMs > 0 && !state?.active ? (
               <small>
-                Reset available in {Math.ceil(cooldownRemainingMs / 1_000)}s
+                Demo available in {Math.ceil(cooldownRemainingMs / 1_000)}s
               </small>
             ) : (
               <small>{phaseDetail}</small>
@@ -340,12 +341,12 @@ export function DemoDashboard() {
       </div>
 
       <div className="evidence-layout">
-        <IncidentTimeline steps={state?.steps ?? []} />
         <ResolutionCard
           incident={state?.incident ?? null}
           result={state?.result ?? null}
           steps={state?.steps ?? []}
         />
+        <IncidentTimeline steps={state?.steps ?? []} />
       </div>
     </div>
   );

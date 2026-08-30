@@ -24,8 +24,8 @@ const ACTION_LABELS: Record<string, string> = {
   diagnosis_completed: "Produced an evidence-backed diagnosis",
   manager_evidence_review: "Reviewed evidence and selected the next step",
   policy_decision: "Checked the action against the safety policy",
-  recovery_failed: "Attempted the approved recovery action",
-  recovery_executed: "Executed the approved recovery action",
+  recovery_failed: "Attempted the allowlisted, policy-checked recovery action",
+  recovery_executed: "Executed the allowlisted, policy-checked recovery action",
   verification_completed: "Ran a fresh service health check",
 };
 
@@ -63,26 +63,7 @@ function formatLatency(latencyMs: number | null) {
   return `${(latencyMs / 1_000).toFixed(1)}s`;
 }
 
-function tokenSummary(step: PublicStep) {
-  if (
-    step.role !== "investigator" ||
-    (step.reportedInputTokens === null && step.reportedOutputTokens === null)
-  ) {
-    return null;
-  }
-
-  const parts: string[] = [];
-  if (step.reportedInputTokens !== null) {
-    parts.push(`Input ${step.reportedInputTokens.toLocaleString("en-US")}`);
-  }
-  if (step.reportedOutputTokens !== null) {
-    parts.push(`Output ${step.reportedOutputTokens.toLocaleString("en-US")}`);
-  }
-  return `${parts.join(" · ")} tokens`;
-}
-
 function TimelineStep({ step }: { step: PublicStep }) {
-  const tokenText = tokenSummary(step);
   const action = ACTION_LABELS[step.kind] ?? humanize(step.kind);
   const status = STATUS_LABELS[step.status];
 
@@ -112,16 +93,19 @@ function TimelineStep({ step }: { step: PublicStep }) {
         <h3>{action}</h3>
 
         {step.safeCommandLabel ? (
-          <div className="command-line">
-            <span aria-hidden="true">$</span>
+          <div className="operation-line">
+            <span className="operation-label">Operation</span>
             <code>{step.safeCommandLabel}</code>
           </div>
         ) : null}
 
         {step.sanitizedOutput ? (
-          <pre className="trace-output" data-testid="trace-output">
-            {step.sanitizedOutput}
-          </pre>
+          <details className="trace-evidence">
+            <summary>View raw evidence</summary>
+            <pre className="trace-output" data-testid="trace-output">
+              {step.sanitizedOutput}
+            </pre>
+          </details>
         ) : null}
 
         {step.errorSummary ? (
@@ -130,11 +114,6 @@ function TimelineStep({ step }: { step: PublicStep }) {
 
         <div className="trace-metrics">
           <span>{formatLatency(step.latencyMs)}</span>
-          {tokenText ? <span>{tokenText}</span> : null}
-          {step.role === "investigator" &&
-          step.costStatus === "unavailable_chatgpt_subscription" ? (
-            <span>Cost unavailable with ChatGPT subscription login</span>
-          ) : null}
         </div>
       </article>
     </li>
@@ -168,8 +147,8 @@ export function IncidentTimeline({ steps }: { steps: PublicStep[] }) {
           <div>
             <h3>No incident steps yet</h3>
             <p>
-              Reset the disposable service to watch each real recovery step
-              appear here.
+              Run the recovery demo to watch each recorded recovery step appear
+              here.
             </p>
           </div>
         </div>

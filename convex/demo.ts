@@ -225,19 +225,11 @@ export const getPublicState = query({
         startedAt: step.startedAt,
         finishedAt: step.finishedAt ?? null,
         latencyMs: step.latencyMs ?? null,
-        reportedInputTokens: step.reportedInputTokens ?? null,
-        reportedOutputTokens: step.reportedOutputTokens ?? null,
-        costStatus: step.costStatus ?? "not_reported",
       })),
       result: displayedIncident
         ? {
             finalHealth: displayedIncident.finalHealth ?? null,
             totalLatencyMs: displayedIncident.totalLatencyMs ?? null,
-            reportedInputTokens:
-              displayedIncident.reportedInputTokens ?? null,
-            reportedOutputTokens:
-              displayedIncident.reportedOutputTokens ?? null,
-            costStatus: displayedIncident.costStatus,
           }
         : null,
     };

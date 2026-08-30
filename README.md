@@ -8,19 +8,19 @@ A GrowthX Build Week project proving a bounded operational recovery loop: detect
 
 ## Verified M1 evidence
 
-On Sun 30 Aug 2026, three separate public `Reset demo` runs completed without terminal assistance after the click:
+On Sun 30 Aug 2026, three separate public recovery-demo runs completed without terminal assistance after the click:
 
-| Run | Result | Steps | Recovery time | Model usage | Human action |
-|---|---|---:|---:|---|---|
-| 1 | `FAILED → HEALTHY` | 9 | 12.7s | 7,980 input / 93 output tokens | None |
-| 2 | `FAILED → HEALTHY` | 9 | 11.6s | 8,146 input / 97 output tokens | None |
-| 3 — independent review | `FAILED → HEALTHY` | 9 | 11.8s | 8,201 input / 92 output tokens | None |
+| Run | Result | Steps | Recovery time | Human action |
+|---|---|---:|---:|---|
+| 1 | `FAILED → HEALTHY` | 9 | 12.7s | None |
+| 2 | `FAILED → HEALTHY` | 9 | 11.6s | None |
+| 3 — independent review | `FAILED → HEALTHY` | 9 | 11.8s | None |
 
 - `OUTPUT-L3`: the controlled Docker service was really stopped, failed its health check, received only the fixed allowlisted restart, and passed a fresh independent HTTP health check. Evidence: [resolution card](output/playwright/output-l3-resolution.png). This is explicitly staged/test output, so the honest rubric level is **Working product shipping real output L3**.
-- `OBS-L3`: incident `jd7bxw8ahczeaj9cxx548cpaz18denet` restored after a full page reload with nine ordered steps across Incident Manager, Investigator, Policy Gate, Executor, and Verifier. Each step shows status, sanitized output, and latency; the Investigator step also shows tokens. Evidence: [persisted timeline](output/playwright/observability-l3-timeline.png). Cost is unavailable under ChatGPT subscription login and there are no run filters, so the honest rubric level is **Observability L3**, not L4.
-- Phone check: the deployed page rendered at 390×844 with no horizontal overflow and zero browser errors. Evidence: [phone viewport](output/playwright/recovery-loop-phone.png).
+- `OBS-L3`: incident `jd7bxw8ahczeaj9cxx548cpaz18denet` restored after a full page reload with nine ordered steps across Incident Manager, Investigator, Policy Gate, Executor, and Verifier. Each public step shows status, its human-readable operation, collapsed sanitized evidence, and elapsed time. Private model usage and login details are not returned by the public query. Evidence: [persisted timeline](output/playwright/observability-l3-timeline.png). The public UI has no run filters or grounded per-step cost, so the honest rubric level is **Observability L3**, not L4.
+- Phone check: the corrected local production build rendered at 390×844 with the outcome before the collapsed timeline, no horizontal overflow, and zero browser errors. Evidence: [phone viewport](output/playwright/recovery-loop-phone.png).
 - Synthetic/control evaluation: `npm run eval` reports **7 PASS, 3 SKIPPED_M1, 0 FAIL** for `recovery-loop-v1`. The skipped scheduled-job and cross-run-memory cases are not presented as implemented.
-- Fresh independent review: **PASS, no blockers**. It separately verified one empty-body public request, duplicate/offline/failed-verification controls, reload persistence, desktop and phone widths, 257/257 tests, and zero browser errors or warnings. Three non-blocking UI nits are parked for user evidence: a brief early outcome placeholder, the long phone trace, and no visible stable incident ID.
+- Fresh independent review: **PASS, no blockers**. It separately verified one empty-body public request, duplicate/offline/failed-verification controls, reload persistence, desktop and phone widths, 257/257 tests, and zero browser errors or warnings. This pass addresses the long phone trace; the brief early outcome placeholder and no visible stable incident ID remain parked for Monday user evidence.
 
 ## Current safety boundary
 
@@ -34,6 +34,7 @@ On Sun 30 Aug 2026, three separate public `Reset demo` runs completed without te
 - A successful Docker command never proves recovery; a fresh HTTP 200 response with the expected service identity and `status: healthy` is required.
 - No employer systems, customer systems, production data, host mounts, credentials, or arbitrary shell commands are used.
 - Any future real-user environment remains approval-first until action-level trust is validated.
+- The staged public demo has no human approval step; its single restart is allowlisted and policy-checked automatically.
 
 ## Local verification
 
