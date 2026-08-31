@@ -16,6 +16,9 @@
     "demo:start": "tsx scripts/demo-service-start.ts",
     "demo:preflight": "tsx scripts/demo-service-preflight.ts",
     "demo:proof": "tsx scripts/m0-runner-proof.ts",
+    "sandbox:build": "docker buildx build --pull --load --tag gx-autodevops-linux-sandbox:m2 --file linux-sandbox/Dockerfile linux-sandbox",
+    "sandbox:start": "tsx scripts/linux-sandbox-start.ts",
+    "sandbox:proof": "tsx scripts/linux-sandbox-proof.ts",
     "eval": "tsx scripts/run-evals.ts"
   },
   "dependencies": {

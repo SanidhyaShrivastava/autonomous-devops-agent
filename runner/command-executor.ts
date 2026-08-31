@@ -9,10 +9,13 @@ const DOCKER_EXECUTABLE = "docker" as const;
 
 export interface ExecFileOptions {
   readonly encoding: "utf8";
+  readonly env: NodeJS.ProcessEnv;
   readonly maxBuffer: number;
   readonly shell: false;
   readonly timeout: number;
 }
+
+export type DockerEnvironmentOverrides = Readonly<Record<string, string>>;
 
 export type ExecFileError = Error & {
   readonly code?: number | string | null;
@@ -89,7 +92,10 @@ export class DockerCommandError extends Error {
 }
 
 export interface DockerCommandExecutor {
-  run(args: readonly string[]): Promise<DockerCommandResult>;
+  run(
+    args: readonly string[],
+    environment?: DockerEnvironmentOverrides,
+  ): Promise<DockerCommandResult>;
 }
 
 export interface DockerCommandExecutorDependencies {
@@ -107,8 +113,24 @@ export function createDockerCommandExecutor(
   const now = dependencies.now ?? Date.now;
 
   return {
-    run(args: readonly string[]): Promise<DockerCommandResult> {
-      const fixedArgs = Object.freeze([...args]);
+    run(
+      args: readonly string[],
+      environment: DockerEnvironmentOverrides = {},
+    ): Promise<DockerCommandResult> {
+      const executionArgs = Object.freeze([...args]);
+      const secretValues = Object.values(environment).filter(
+        (value) => value.length > 0,
+      );
+      const redact = (value: string): string =>
+        secretValues.reduce(
+          (safeValue, secret) => safeValue.split(secret).join("[REDACTED]"),
+          value,
+        );
+      const safeArgs = Object.freeze(executionArgs.map(redact));
+      const childEnvironment = Object.freeze({
+        ...process.env,
+        ...environment,
+      });
       const startedAt = now();
 
       return new Promise((resolve, reject) => {
@@ -122,15 +144,25 @@ export function createDockerCommandExecutor(
         ) => {
           reject(
             new DockerCommandError({
-              args: fixedArgs,
-              stdout,
-              stderr,
+              args: safeArgs,
+              stdout: redact(stdout),
+              stderr: redact(stderr),
               exitCode,
               startedAt,
               finishedAt: now(),
               killed,
               signal,
-              cause,
+              cause:
+                secretValues.length === 0
+                  ? cause
+                  : Object.assign(
+                      new Error(
+                        cause instanceof Error
+                          ? redact(cause.message)
+                          : "Docker command invocation failed",
+                      ),
+                      { name: cause instanceof Error ? cause.name : "Error" },
+                    ),
             }),
           );
         };
@@ -138,9 +170,10 @@ export function createDockerCommandExecutor(
         try {
           execFile(
             DOCKER_EXECUTABLE,
-            fixedArgs,
+            executionArgs,
             {
               encoding: "utf8",
+              env: childEnvironment,
               maxBuffer: PROCESS_MAX_BUFFER_BYTES,
               shell: false,
               timeout: PROCESS_TIMEOUT_MS,
@@ -162,9 +195,9 @@ export function createDockerCommandExecutor(
 
               resolve({
                 executable: DOCKER_EXECUTABLE,
-                args: fixedArgs,
-                stdout,
-                stderr,
+                args: safeArgs,
+                stdout: redact(stdout),
+                stderr: redact(stderr),
                 exitCode: 0,
                 startedAt,
                 finishedAt,
