@@ -240,7 +240,7 @@ class FakeRecoveryState implements RecoveryStatePort {
 class FakeWorkload implements DemoWorkloadPort {
   restartAttempts = 0;
   commandLabel: RecoveryActionResult["commandLabel"] =
-    "docker start fixed demo service";
+    "linux agent restart fixed demo service";
   stopped = false;
   stopFailure = false;
   restartFailure = false;
@@ -442,6 +442,19 @@ describe("complete staged recovery orchestration", () => {
     expect(harness.state.steps.map((step) => step.status)).toEqual(
       Array.from({ length: 9 }, () => "succeeded"),
     );
+    expect(
+      harness.state.steps.map((step) => [step.kind, step.safeCommandLabel]),
+    ).toEqual([
+      ["reset_applied", "linux agent stop fixed demo service"],
+      ["failure_confirmed", "linux agent check fixed demo service health"],
+      ["safe_state_collected", "linux agent inspect fixed demo service"],
+      ["safe_logs_collected", "linux agent read fixed demo service logs"],
+      ["diagnosis_completed", "local codex schema-bound diagnosis"],
+      ["manager_evidence_review", undefined],
+      ["policy_decision", undefined],
+      ["recovery_executed", "linux agent restart fixed demo service"],
+      ["verification_completed", "linux agent check fixed demo service health"],
+    ]);
     expect(
       harness.state.steps.find((step) => step.kind === "diagnosis_completed"),
     ).toMatchObject({

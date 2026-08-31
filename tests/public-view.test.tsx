@@ -94,7 +94,7 @@ function step(
     role: "investigator",
     kind: "safe_logs_collected",
     status: "succeeded",
-    safeCommandLabel: "docker logs --tail 30 fixed demo service",
+    safeCommandLabel: "linux agent read fixed demo service logs",
     sanitizedOutput: "demo-service received SIGTERM",
     errorSummary: null,
     startedAt: BASE_TIME + sequence * 1_000,
@@ -129,14 +129,14 @@ function resolvedState() {
       step(3, {
         role: "executor",
         kind: "recovery_executed",
-        safeCommandLabel: "docker start fixed demo service",
+        safeCommandLabel: "linux agent restart fixed demo service",
         sanitizedOutput: '{"actionId":"restart_demo_service","exitCode":0}',
         latencyMs: 342,
       }),
       step(4, {
         role: "verifier",
         kind: "verification_completed",
-        safeCommandLabel: "HTTP GET fixed demo health",
+        safeCommandLabel: "linux agent check fixed demo service health",
         sanitizedOutput: '{"healthy":true,"httpStatus":200,"status":"healthy"}',
         latencyMs: 220,
       }),
@@ -156,25 +156,25 @@ function runnerLossSteps() {
     step(1, {
       role: "incident_manager",
       kind: "reset_applied",
-      safeCommandLabel: "docker stop fixed demo service",
+      safeCommandLabel: "linux agent stop fixed demo service",
       sanitizedOutput: '{"resetApplied":true}',
     }),
     step(2, {
       role: "incident_manager",
       kind: "failure_confirmed",
-      safeCommandLabel: "HTTP GET fixed demo health",
+      safeCommandLabel: "linux agent check fixed demo service health",
       sanitizedOutput: '{"healthy":false}',
     }),
     step(3, {
       role: "investigator",
       kind: "safe_state_collected",
-      safeCommandLabel: "docker inspect fixed demo service",
+      safeCommandLabel: "linux agent inspect fixed demo service",
       sanitizedOutput: '{"status":"exited"}',
     }),
     step(4, {
       role: "investigator",
       kind: "safe_logs_collected",
-      safeCommandLabel: "docker logs --tail 30 fixed demo service",
+      safeCommandLabel: "linux agent read fixed demo service logs",
       sanitizedOutput: "demo-service received SIGTERM",
     }),
   ];
@@ -894,13 +894,13 @@ describe("public recovery dashboard", () => {
           step(1, {
             role: "executor",
             kind: "recovery_executed",
-            safeCommandLabel: "docker start fixed demo service",
+            safeCommandLabel: "linux agent restart fixed demo service",
           }),
           step(2, {
             role: "verifier",
             kind: "verification_completed",
             status: "failed",
-            safeCommandLabel: "HTTP GET fixed demo health",
+            safeCommandLabel: "linux agent check fixed demo service health",
             sanitizedOutput: '{"healthy":false,"httpStatus":503}',
           }),
         ],
@@ -940,6 +940,46 @@ describe("public recovery dashboard", () => {
             role: "executor",
             kind: "recovery_failed",
             status: "failed",
+            safeCommandLabel: "linux agent restart fixed demo service",
+            sanitizedOutput: null,
+            errorSummary: "The fixed recovery action failed.",
+          }),
+        ],
+        result: {
+          finalHealth: "failed",
+          totalLatencyMs: 2_000,
+          reportedInputTokens: null,
+          reportedOutputTokens: null,
+          costStatus: "not_reported",
+        },
+      }),
+    );
+
+    render(<DemoDashboard />);
+
+    expect(
+      screen.getByText(
+        "linux agent restart fixed demo service · attempt failed",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByText("No recovery action executed"),
+    ).not.toBeInTheDocument();
+  });
+
+  it("continues to render a legacy stored Docker operation label", () => {
+    convexMock.useQuery.mockReturnValue(
+      publicState({
+        incident: incident("failed_recovery", {
+          finalHealth: "failed",
+          finishedAt: BASE_TIME + 2_000,
+          terminalReason: "fixed_restart_failed",
+        }),
+        steps: [
+          step(1, {
+            role: "executor",
+            kind: "recovery_failed",
+            status: "failed",
             safeCommandLabel: "docker start fixed demo service",
             sanitizedOutput: null,
             errorSummary: "The fixed recovery action failed.",
@@ -960,9 +1000,6 @@ describe("public recovery dashboard", () => {
     expect(
       screen.getByText("docker start fixed demo service · attempt failed"),
     ).toBeInTheDocument();
-    expect(
-      screen.queryByText("No recovery action executed"),
-    ).not.toBeInTheDocument();
   });
 
   it("shows an investigation failure as requiring an engineer", () => {

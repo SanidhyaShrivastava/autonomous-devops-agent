@@ -6,18 +6,20 @@ import { config as loadEnvironment } from "dotenv";
 
 import { api } from "../convex/_generated/api";
 import {
-  DEMO_CONTAINER_NAME,
   DEMO_EXPECTED_SERVICE,
   DEMO_EXPECTED_STATUS,
   DEMO_LABEL_VALUE,
 } from "../runner/config";
-import { DockerAdapter } from "../runner/docker-adapter";
+import { LinuxSandboxAdapter } from "../runner/linux-sandbox-adapter";
+import { deriveSandboxAgentToken } from "../runner/sandbox-token";
 
 const NETWORK_TIMEOUT_MS = 10_000;
 const PUBLIC_APP_MARKER =
   "Recover one failed Linux service safely in about 12 seconds.";
 
-function requiredEnvironment(name: "CONVEX_URL" | "PUBLIC_APP_URL") {
+function requiredEnvironment(
+  name: "CONVEX_URL" | "PUBLIC_APP_URL" | "RUNNER_TOKEN",
+) {
   const value = process.env[name]?.trim();
   if (!value) {
     throw new Error(`${name} is required`);
@@ -86,14 +88,18 @@ async function main(): Promise<void> {
     quiet: true,
   });
 
-  const adapter = new DockerAdapter();
-  let state: Awaited<ReturnType<DockerAdapter["inspectSafeState"]>>;
-  let health: Awaited<ReturnType<DockerAdapter["checkHealthOnce"]>>;
+  const adapter = new LinuxSandboxAdapter({
+    token: deriveSandboxAgentToken(requiredEnvironment("RUNNER_TOKEN")),
+  });
+  let state: Awaited<ReturnType<LinuxSandboxAdapter["inspectSafeState"]>>;
+  let health: Awaited<ReturnType<LinuxSandboxAdapter["checkHealthOnce"]>>;
   try {
     state = await adapter.inspectSafeState();
     health = await adapter.checkHealthOnce();
   } catch {
-    throw new Error("Preflight failed: Docker or the demo service is unavailable.");
+    throw new Error(
+      "Preflight failed: the Linux sandbox or demo service is unavailable.",
+    );
   }
 
   if (
@@ -136,8 +142,8 @@ async function main(): Promise<void> {
 
   await verifyPublicApp(publicAppOrigin);
 
-  console.log("Docker: ready");
-  console.log(`Container (${DEMO_CONTAINER_NAME}): ready`);
+  console.log("Linux sandbox agent: ready");
+  console.log(`Child service (${DEMO_EXPECTED_SERVICE}): ready`);
   console.log("Health: healthy");
   console.log("Codex login: ChatGPT");
   console.log("Convex production: reachable");

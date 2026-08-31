@@ -15,7 +15,6 @@ import {
 } from "./convex-client";
 import { createCodexInvestigator } from "./codex-investigator";
 import { DEMO_LABEL_VALUE } from "./config";
-import { DockerAdapter } from "./docker-adapter";
 import {
   createEnvironmentRestorer,
   type EnvironmentRecoveryRequest,
@@ -23,12 +22,17 @@ import {
   type EnvironmentRestorer,
 } from "./environment-restorer";
 import {
+  LinuxSandboxAdapter,
+  type LinuxSandboxAdapterDependencies,
+} from "./linux-sandbox-adapter";
+import {
   createRecoveryOrchestrator,
   type DemoWorkloadPort,
   type RecoveryActivityObserver,
   type RecoveryCommandSnapshot,
   type RecoveryOrchestrator,
 } from "./orchestrator";
+import { deriveSandboxAgentToken } from "./sandbox-token";
 
 const DEFAULT_HEARTBEAT_INTERVAL_MS = 2_000;
 const DEFAULT_SHUTDOWN_GRACE_MS = 2_000;
@@ -382,6 +386,20 @@ function requiredEnvironment(
   return value;
 }
 
+export type RunnerWorkloadFactory = (
+  dependencies: LinuxSandboxAdapterDependencies,
+) => LinuxSandboxAdapter;
+
+const defaultRunnerWorkloadFactory: RunnerWorkloadFactory = (dependencies) =>
+  new LinuxSandboxAdapter(dependencies);
+
+export function createRunnerWorkload(
+  runnerToken: string,
+  createAdapter: RunnerWorkloadFactory = defaultRunnerWorkloadFactory,
+): LinuxSandboxAdapter {
+  return createAdapter({ token: deriveSandboxAgentToken(runnerToken) });
+}
+
 async function startLocalRunner() {
   loadEnvironment({
     path: [resolve(".env.runner.local"), resolve(".env.local")],
@@ -395,7 +413,7 @@ async function startLocalRunner() {
     throw new Error("RUNNER_ID does not match the fixed demo runner");
   }
 
-  const workload = new DockerAdapter();
+  const workload = createRunnerWorkload(runnerToken);
   const client = createConvexRunnerClient({
     convexUrl,
     runnerToken,
@@ -449,7 +467,7 @@ function isDirectExecution() {
 if (isDirectExecution()) {
   void startLocalRunner().catch(() => {
     console.error(
-      "Runner could not start. Check Docker, Convex, and the runner settings.",
+      "Runner could not start. Check the Linux sandbox, Convex, and the runner settings.",
     );
     process.exitCode = 1;
   });

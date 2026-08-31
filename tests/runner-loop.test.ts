@@ -7,7 +7,16 @@ import type {
   RecoveryCommandSnapshot,
   RecoveryOrchestrator,
 } from "../runner/orchestrator";
-import { startRunnerLoop, verifyIdleDemoWorkloadReady } from "../runner/index";
+import {
+  createRunnerWorkload,
+  startRunnerLoop,
+  verifyIdleDemoWorkloadReady,
+} from "../runner/index";
+import {
+  LinuxSandboxAdapter,
+  type LinuxSandboxAdapterDependencies,
+} from "../runner/linux-sandbox-adapter";
+import { deriveSandboxAgentToken } from "../runner/sandbox-token";
 
 function deferred<T>() {
   let resolve!: (value: T) => void;
@@ -614,6 +623,40 @@ describe("runner startup readiness", () => {
     checkedAt: 110,
     attempts: 1,
   };
+
+  it("constructs the Linux workload with only a derived sandbox token", () => {
+    const runnerToken = "raw-convex-runner-token";
+    const createAdapter = vi.fn(
+      (dependencies: LinuxSandboxAdapterDependencies) =>
+        new LinuxSandboxAdapter({
+          ...dependencies,
+          fetch: async () => ({ status: 500, json: async () => ({}) }),
+        }),
+    );
+
+    const workload = createRunnerWorkload(runnerToken, createAdapter);
+
+    expect(workload).toBeInstanceOf(LinuxSandboxAdapter);
+    expect(createAdapter).toHaveBeenCalledExactlyOnceWith({
+      token: deriveSandboxAgentToken(runnerToken),
+    });
+    expect(JSON.stringify(createAdapter.mock.calls)).not.toContain(runnerToken);
+  });
+
+  it("keeps the demo aliases on the Linux sandbox lifecycle", async () => {
+    const packageConfiguration = await import("../package.json");
+
+    expect(packageConfiguration.default.scripts).toMatchObject({
+      "demo:build":
+        "docker buildx build --pull --load --tag gx-autodevops-linux-sandbox:m2 --file linux-sandbox/Dockerfile linux-sandbox",
+      "demo:start": "tsx scripts/linux-sandbox-start.ts",
+      "demo:proof": "tsx scripts/linux-sandbox-proof.ts",
+      "demo:legacy:build":
+        "docker buildx build --pull --load --tag gx-autodevops-demo-service:m0 ./demo-service",
+      "demo:legacy:start": "tsx scripts/demo-service-start.ts",
+      "demo:legacy:proof": "tsx scripts/m0-runner-proof.ts",
+    });
+  });
 
   it("proves the exact idle workload is running and healthy", async () => {
     const client = { getActiveCommand: vi.fn(async () => null) };

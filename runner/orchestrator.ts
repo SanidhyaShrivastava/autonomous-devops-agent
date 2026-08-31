@@ -597,7 +597,7 @@ export function createRecoveryOrchestrator(
               kind: "reset_applied",
               status: "succeeded",
               safeCommandLabel: stoppedByThisRun
-                ? "docker stop fixed demo service"
+                ? "linux agent stop fixed demo service"
                 : undefined,
               sanitizedOutput: safeJson({
                 validatedDemoLabel: stateBeforeReset.demoLabel,
@@ -664,7 +664,7 @@ export function createRecoveryOrchestrator(
             role: "incident_manager",
             kind: "failure_confirmed",
             status: "succeeded",
-            safeCommandLabel: "HTTP GET fixed demo health",
+            safeCommandLabel: "linux agent check fixed demo service health",
             sanitizedOutput: safeJson(failedHealth),
             startedAt: failedHealth.requestStartedAt,
             finishedAt: failedHealth.checkedAt,
@@ -686,7 +686,7 @@ export function createRecoveryOrchestrator(
             role: "incident_manager",
             kind: "failure_confirmed",
             status: "succeeded",
-            safeCommandLabel: "HTTP GET fixed demo health",
+            safeCommandLabel: "linux agent check fixed demo service health",
             sanitizedOutput: safeJson({
               restoredFromAuthoritativeCommandState: true,
               currentHealth: failedHealth,
@@ -770,7 +770,7 @@ export function createRecoveryOrchestrator(
               role: "investigator",
               kind: "safe_state_collected",
               status: "succeeded",
-              safeCommandLabel: "docker inspect fixed demo service",
+              safeCommandLabel: "linux agent inspect fixed demo service",
               sanitizedOutput: safeJson(safeState),
               startedAt: inspectStartedAt,
               finishedAt: inspectFinishedAt,
@@ -785,7 +785,7 @@ export function createRecoveryOrchestrator(
               role: "investigator",
               kind: "safe_logs_collected",
               status: "succeeded",
-              safeCommandLabel: "docker logs --tail 30 fixed demo service",
+              safeCommandLabel: "linux agent read fixed demo service logs",
               sanitizedOutput: safeJson(safeLogs),
               startedAt: logsStartedAt,
               finishedAt: logsFinishedAt,
@@ -1075,7 +1075,7 @@ export function createRecoveryOrchestrator(
                 role: "executor",
                 kind: "recovery_failed",
                 status: "failed",
-                safeCommandLabel: "docker start fixed demo service",
+                safeCommandLabel: "linux agent restart fixed demo service",
                 errorSummary: "The fixed recovery action failed.",
                 startedAt: failedAt,
                 finishedAt: failedAt,
@@ -1179,7 +1179,7 @@ export function createRecoveryOrchestrator(
             role: "verifier",
             kind: "verification_completed",
             status: verification.healthy ? "succeeded" : "failed",
-            safeCommandLabel: "HTTP GET fixed demo health",
+            safeCommandLabel: "linux agent check fixed demo service health",
             sanitizedOutput: safeJson(verification),
             startedAt: verification.requestStartedAt,
             finishedAt: verification.checkedAt,
