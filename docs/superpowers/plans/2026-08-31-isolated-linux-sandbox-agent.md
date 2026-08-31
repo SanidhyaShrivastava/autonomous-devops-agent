@@ -543,15 +543,15 @@ At 1440 width: press **Run recovery demo**, confirm the Linux child service real
 
 At 390 width: run a fresh recovery, confirm result above timeline, no horizontal overflow, raw evidence collapsed, no token/cost/auth metadata, and zero browser errors.
 
-- [ ] **Step 6: Verify runner-loss behavior**
+- [x] **Step 6: Verify runner-loss behavior**
 
 During a fresh run after step 4, stop only the validated coordinator process. Confirm Convex writes a terminal failed incident within 15 seconds, reload preserves it, the page explains the runner loss, and the button stays blocked until the coordinator returns and the sandbox child service is freshly restored. Restart one coordinator and complete a new nine-step healthy run.
 
-- [ ] **Step 7: Update documentation with measured facts only**
+- [x] **Step 7: Update documentation with measured facts only**
 
 README must explain: Linux sandbox container, Mac coordinator, exact fixed action, no host access, start/preflight commands, controlled/staged L3 cap, and rollback boundary. CHANGELOG gets one line stating what a visitor can now do. IDEA_SCOPE records exact test counts, measured times, commit/deployment IDs, and remaining limits; it must not call the container an external server or L4 evidence.
 
-- [ ] **Step 8: Run final verification and commit docs**
+- [x] **Step 8: Run final verification and commit docs**
 
 Run:
 
