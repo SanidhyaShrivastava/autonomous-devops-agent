@@ -3,7 +3,10 @@ import {
   DEMO_SERVICE_IDENTITY,
 } from "../src/lib/contracts";
 import { DEMO_LABEL_VALUE } from "./config";
-import type { HealthEvidence, SafeContainerState } from "./docker-adapter";
+import type {
+  HealthEvidence,
+  SafeWorkloadState,
+} from "./workload-types";
 
 const SAFE_ENVIRONMENT_RECOVERY_FAILURE_SUMMARY =
   "The fixed demo environment could not be restored and verified healthy.";
@@ -40,7 +43,7 @@ export interface EnvironmentRecoveryClient {
 }
 
 export interface EnvironmentRecoveryWorkload {
-  ensureDemoService(): Promise<SafeContainerState>;
+  ensureDemoService(): Promise<SafeWorkloadState>;
   verifyFreshHealth(notBefore: number): Promise<HealthEvidence>;
 }
 

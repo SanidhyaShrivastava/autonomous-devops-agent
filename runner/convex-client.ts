@@ -24,6 +24,11 @@ import type {
   EnvironmentRecoveryClient,
   EnvironmentRecoveryRequest,
 } from "./environment-restorer";
+import {
+  LEGACY_DOCKER_RECOVERY_LABEL,
+  LINUX_AGENT_RECOVERY_LABEL,
+  type RecoveryCommandLabel,
+} from "./workload-types";
 
 const DemoCommandStatusSchema = z.enum([
   "queued",
@@ -43,6 +48,15 @@ const RecoveryCommandStatusSchema = z.enum([
   "blocked",
   "failed",
 ]);
+
+const RecoveryCommandLabelSchema = z.union([
+  z.literal(LEGACY_DOCKER_RECOVERY_LABEL),
+  z.literal(LINUX_AGENT_RECOVERY_LABEL),
+]);
+
+export function parseRecoveryLabel(value: unknown): RecoveryCommandLabel {
+  return RecoveryCommandLabelSchema.parse(value);
+}
 
 const ActionIdSchema = z.enum(["restart_demo_service", "no_action"]);
 const IdentifierSchema = z.string().min(1).max(128);
@@ -106,7 +120,7 @@ const ActiveDemoCommandSchema = z
         completedAt: z.number().finite().nonnegative().nullable(),
         executionEvidence: z
           .object({
-            commandLabel: z.literal("docker start fixed demo service"),
+            commandLabel: RecoveryCommandLabelSchema,
             exitCode: z.literal(0),
             startedAt: z.number().finite().nonnegative(),
             finishedAt: z.number().finite().nonnegative(),

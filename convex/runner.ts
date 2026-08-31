@@ -1,5 +1,10 @@
 import { v } from "convex/values";
 
+import {
+  LEGACY_DOCKER_RECOVERY_LABEL,
+  LINUX_AGENT_RECOVERY_LABEL,
+  type RecoveryCommandLabel,
+} from "../runner/workload-types";
 import type { Doc, Id } from "./_generated/dataModel";
 import {
   internalMutation,
@@ -83,8 +88,14 @@ const TERMINAL_STATES = new Set<IncidentPhase>([
   "investigation_failed",
 ]);
 
-const DEMO_RECOVERY_COMMAND_LABEL =
-  "docker start fixed demo service" as const;
+const DEMO_RECOVERY_COMMAND_LABELS = new Set<RecoveryCommandLabel>([
+  LEGACY_DOCKER_RECOVERY_LABEL,
+  LINUX_AGENT_RECOVERY_LABEL,
+]);
+
+function isRecoveryCommandLabel(value: string): value is RecoveryCommandLabel {
+  return DEMO_RECOVERY_COMMAND_LABELS.has(value as RecoveryCommandLabel);
+}
 
 const ALLOWED_NEXT_PHASES: Readonly<
   Record<IncidentPhase, readonly IncidentPhase[]>
@@ -1551,7 +1562,7 @@ export const updateIncidentPhase = mutation({
           "execution_latency_ms",
         );
         if (
-          executionEvidence.commandLabel !== DEMO_RECOVERY_COMMAND_LABEL ||
+          !isRecoveryCommandLabel(executionEvidence.commandLabel) ||
           executionEvidence.exitCode !== 0 ||
           recovery.claimedAt === undefined ||
           executionStartedAt < recovery.claimedAt ||
@@ -1565,7 +1576,7 @@ export const updateIncidentPhase = mutation({
         await ctx.db.patch(recovery._id, {
           status: "executed",
           completedAt: now,
-          executionCommandLabel: DEMO_RECOVERY_COMMAND_LABEL,
+          executionCommandLabel: executionEvidence.commandLabel,
           executionExitCode: 0,
           executionStartedAt,
           executionFinishedAt,
@@ -1764,7 +1775,8 @@ export const completeIncident = mutation({
         !recovery ||
         recovery.status !== "executed" ||
         recovery.completedAt === undefined ||
-        recovery.executionCommandLabel !== DEMO_RECOVERY_COMMAND_LABEL ||
+        !recovery.executionCommandLabel ||
+        !isRecoveryCommandLabel(recovery.executionCommandLabel) ||
         recovery.executionExitCode !== 0 ||
         recovery.executionStartedAt === undefined ||
         recovery.executionFinishedAt === undefined ||

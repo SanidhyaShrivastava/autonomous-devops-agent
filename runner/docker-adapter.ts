@@ -19,6 +19,25 @@ import {
   DockerCommandError,
   type DockerCommandExecutor,
 } from "./command-executor";
+import {
+  LEGACY_DOCKER_RECOVERY_LABEL,
+  type HealthEvidence,
+  type RecoveryActionResult,
+  type SafeLogTail,
+  type SafeWorkloadState,
+} from "./workload-types";
+
+export {
+  LEGACY_DOCKER_RECOVERY_LABEL,
+  LINUX_AGENT_RECOVERY_LABEL,
+  type HealthEvidence,
+  type RecoveryActionResult,
+  type RecoveryCommandLabel,
+  type SafeLogTail,
+  type SafeWorkloadState,
+} from "./workload-types";
+
+export type SafeContainerState = SafeWorkloadState;
 
 const HEALTH_REQUEST_TIMEOUT_MS = 2_000;
 const HEALTH_VERIFY_TIMEOUT_MS = 10_000;
@@ -65,40 +84,6 @@ const HealthPayloadSchema = z
 
 interface InternalContainerInspection extends SafeContainerState {
   readonly containerId: string;
-}
-
-export interface SafeContainerState {
-  readonly status: string;
-  readonly exitCode: number;
-  readonly oomKilled: boolean;
-  readonly finishedAt: string;
-  readonly demoLabel: typeof DEMO_LABEL_VALUE;
-}
-
-export interface SafeLogTail {
-  readonly lines: readonly string[];
-  readonly lineCount: number;
-  readonly characterCount: number;
-  readonly truncated: boolean;
-}
-
-export interface RecoveryActionResult {
-  readonly actionId: typeof DEMO_ACTION_ID;
-  readonly commandLabel: "docker start fixed demo service";
-  readonly exitCode: 0;
-  readonly startedAt: number;
-  readonly finishedAt: number;
-  readonly durationMs: number;
-}
-
-export interface HealthEvidence {
-  readonly healthy: boolean;
-  readonly httpStatus: number | null;
-  readonly service: string | null;
-  readonly status: string | null;
-  readonly requestStartedAt: number;
-  readonly checkedAt: number;
-  readonly attempts: number;
 }
 
 export interface HealthResponse {
@@ -287,7 +272,7 @@ export class DockerAdapter {
 
     return {
       actionId: request.actionId,
-      commandLabel: "docker start fixed demo service",
+      commandLabel: LEGACY_DOCKER_RECOVERY_LABEL,
       exitCode: result.exitCode,
       startedAt: result.startedAt,
       finishedAt: result.finishedAt,

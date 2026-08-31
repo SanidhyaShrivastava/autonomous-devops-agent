@@ -397,6 +397,7 @@ async function createAllowedRecovery(
 async function moveRecoveryToVerifying(
   t: ConvexHarness,
   executionNonce = "verified-recovery",
+  commandLabel = "docker start fixed demo service",
 ) {
   const ready = await createAllowedRecovery(t, executionNonce);
   const executing = (await t.mutation(updateIncidentPhase, {
@@ -426,7 +427,7 @@ async function moveRecoveryToVerifying(
     expectedRecoveryStateVersion: 1,
     executionNonce,
     executionEvidence: {
-      commandLabel: "docker start fixed demo service",
+      commandLabel,
       exitCode: 0,
       startedAt: BASE_TIME,
       finishedAt: BASE_TIME + 100,
@@ -1975,6 +1976,55 @@ describe("incident creation and ordered trace", () => {
 });
 
 describe("recovery state and completion", () => {
+  it.each([
+    {
+      name: "legacy Docker",
+      label: "docker start fixed demo service",
+      nonce: "legacy-label-evidence",
+    },
+    {
+      name: "Linux agent",
+      label: "linux agent restart fixed demo service",
+      nonce: "linux-label-evidence",
+    },
+  ])(
+    "accepts, persists, and resolves $name recovery evidence",
+    async ({ label, nonce }) => {
+      const t = createHarness();
+      const ready = await moveRecoveryToVerifying(t, nonce, label);
+
+      expect(await tableRows(t, "recoveryCommands")).toEqual([
+        expect.objectContaining({
+          executionCommandLabel: label,
+        }),
+      ]);
+
+      await expect(
+        t.mutation(completeIncident, {
+          runnerToken: RUNNER_TOKEN,
+          runnerId: RUNNER_ID,
+          demoCommandId: ready.demoCommandId,
+          incidentId: ready.incident.incidentId,
+          recoveryCommandId: ready.recovery.recoveryCommandId,
+          executionNonce: ready.executionNonce,
+          expectedPhase: "verifying",
+          expectedIncidentStateVersion: ready.verifying.stateVersion,
+          expectedCommandStateVersion: ready.commandStateVersion,
+          expectedRecoveryStateVersion: ready.recoveryStateVersion,
+          terminalState: "resolved",
+          finalHealth: "healthy",
+          verification: {
+            service: "gx-autodevops-demo-service",
+            status: "healthy",
+            httpStatus: 200,
+            requestStartedAt: BASE_TIME + 1_000,
+            checkedAt: BASE_TIME + 1_001,
+          },
+        }),
+      ).resolves.toMatchObject({ terminalState: "resolved" });
+    },
+  );
+
   it("requires exact successful execution evidence before verification", async () => {
     const t = createHarness();
     const ready = await createAllowedRecovery(t, "evidence-required");
@@ -2012,7 +2062,7 @@ describe("recovery state and completion", () => {
 
     for (const executionEvidence of [
       {
-        commandLabel: "docker start another service",
+        commandLabel: "run anything",
         exitCode: 0,
         startedAt: BASE_TIME,
         finishedAt: BASE_TIME + 100,

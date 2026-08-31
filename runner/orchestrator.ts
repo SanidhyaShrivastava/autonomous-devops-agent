@@ -22,9 +22,10 @@ import { sanitizePublicOutput } from "../src/lib/sanitize";
 import type {
   HealthEvidence,
   RecoveryActionResult,
-  SafeContainerState,
+  RecoveryCommandLabel,
   SafeLogTail,
-} from "./docker-adapter";
+  SafeWorkloadState,
+} from "./workload-types";
 import type {
   CodexInvestigator,
   InvestigationEvidence,
@@ -54,7 +55,7 @@ export type RecoveryCommandStatus =
   | "failed";
 
 export interface RecoveryExecutionEvidence {
-  readonly commandLabel: "docker start fixed demo service";
+  readonly commandLabel: RecoveryCommandLabel;
   readonly exitCode: 0;
   readonly startedAt: number;
   readonly finishedAt: number;
@@ -246,7 +247,7 @@ export interface RecoveryStatePort {
 }
 
 export interface DemoWorkloadPort {
-  inspectSafeState(): Promise<SafeContainerState>;
+  inspectSafeState(): Promise<SafeWorkloadState>;
   stopDemoService(): Promise<void>;
   checkHealthOnce(signal?: AbortSignal): Promise<HealthEvidence>;
   readSafeLogTail(): Promise<SafeLogTail>;
@@ -759,7 +760,7 @@ export function createRecoveryOrchestrator(
             }
           }
 
-          let safeState: SafeContainerState;
+          let safeState: SafeWorkloadState;
           let safeLogs: SafeLogTail;
           try {
             const inspectStartedAt = now();

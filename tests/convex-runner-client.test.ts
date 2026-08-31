@@ -4,6 +4,7 @@ import { describe, expect, it, vi } from "vitest";
 import {
   createConvexRunnerClient,
   normalizeConvexDeploymentUrl,
+  parseRecoveryLabel,
 } from "../runner/convex-client";
 
 const RUNNER_TOKEN = "runner-test-token-with-enough-entropy";
@@ -80,6 +81,16 @@ function makeClient(fake: FakeConvexClient) {
 }
 
 describe("Convex runner client", () => {
+  it("parses only the two exact recovery command labels", () => {
+    expect(parseRecoveryLabel("docker start fixed demo service")).toBe(
+      "docker start fixed demo service",
+    );
+    expect(
+      parseRecoveryLabel("linux agent restart fixed demo service"),
+    ).toBe("linux agent restart fixed demo service");
+    expect(() => parseRecoveryLabel("run anything")).toThrow();
+  });
+
   it("keeps the Convex origin slash-free for its WebSocket path", () => {
     expect(
       normalizeConvexDeploymentUrl("https://example.convex.cloud"),

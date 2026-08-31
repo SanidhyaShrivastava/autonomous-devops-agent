@@ -239,6 +239,8 @@ class FakeRecoveryState implements RecoveryStatePort {
 
 class FakeWorkload implements DemoWorkloadPort {
   restartAttempts = 0;
+  commandLabel: RecoveryActionResult["commandLabel"] =
+    "docker start fixed demo service";
   stopped = false;
   stopFailure = false;
   restartFailure = false;
@@ -287,7 +289,7 @@ class FakeWorkload implements DemoWorkloadPort {
     }
     return {
       actionId: "restart_demo_service",
-      commandLabel: "docker start fixed demo service",
+      commandLabel: this.commandLabel,
       exitCode: 0,
       startedAt: BASE_TIME + 1_000,
       finishedAt: BASE_TIME + 1_100,
@@ -350,6 +352,30 @@ afterEach(() => {
 });
 
 describe("complete staged recovery orchestration", () => {
+  it("persists the Linux agent label in executor and durable execution evidence", async () => {
+    const harness = createHarness();
+    harness.workload.commandLabel =
+      "linux agent restart fixed demo service";
+
+    await expect(harness.orchestrator.run(QUEUED_COMMAND)).resolves.toMatchObject({
+      status: "resolved",
+    });
+
+    expect(
+      harness.state.phaseUpdates.find(
+        (update) => update.nextPhase === "verifying",
+      )?.executionEvidence,
+    ).toMatchObject({
+      commandLabel: "linux agent restart fixed demo service",
+    });
+    expect(
+      harness.state.steps.find((step) => step.kind === "recovery_executed"),
+    ).toMatchObject({
+      role: "executor",
+      safeCommandLabel: "linux agent restart fixed demo service",
+    });
+  });
+
   it("persists the exact real success sequence and resolves only after fresh health", async () => {
     const harness = createHarness();
 
