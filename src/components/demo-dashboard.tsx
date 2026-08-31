@@ -450,7 +450,7 @@ export function DemoDashboard() {
               One service · one safe recovery path
             </p>
             <h1>
-              Recover one failed Linux service safely in about 12 seconds.
+              Recover one failed Linux service safely in about 20 seconds.
             </h1>
             <p className="headline-summary">
               Watch the agent investigate the failure, pass an allowlist policy

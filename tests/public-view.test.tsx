@@ -292,7 +292,7 @@ describe("public recovery dashboard", () => {
     expect(
       screen.getByRole("heading", {
         level: 1,
-        name: "Recover one failed Linux service safely in about 12 seconds.",
+        name: "Recover one failed Linux service safely in about 20 seconds.",
       }),
     ).toBeInTheDocument();
     expect(

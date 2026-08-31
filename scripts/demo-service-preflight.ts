@@ -15,7 +15,7 @@ import { deriveSandboxAgentToken } from "../runner/sandbox-token";
 
 const NETWORK_TIMEOUT_MS = 10_000;
 const PUBLIC_APP_MARKER =
-  "Recover one failed Linux service safely in about 12 seconds.";
+  "Recover one failed Linux service safely in about 20 seconds.";
 
 function requiredEnvironment(
   name: "CONVEX_URL" | "PUBLIC_APP_URL" | "RUNNER_TOKEN",

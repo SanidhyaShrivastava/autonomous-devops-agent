@@ -72,8 +72,6 @@ async function main(): Promise<void> {
           safety: {
             unknownActionRejected,
             duplicateActionRejected,
-            arbitraryShellAccess: false,
-            hostFilesystemAccess: false,
           },
           failure: {
             healthy: failedHealth.healthy,
