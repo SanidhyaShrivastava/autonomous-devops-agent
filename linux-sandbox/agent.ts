@@ -511,7 +511,11 @@ export function createAgentRequestHandler(
       }
       if (method === "GET" && path === "/v1/workload/logs") {
         const logs = await options.manager.readSafeLogTail();
-        sendJson(response, 200, boundLogLines(logs.lines));
+        const bounded = boundLogLines(logs.lines);
+        sendJson(response, 200, {
+          ...bounded,
+          truncated: bounded.truncated || logs.truncated,
+        });
         return;
       }
       if (method === "GET" && path === "/v1/workload/health") {

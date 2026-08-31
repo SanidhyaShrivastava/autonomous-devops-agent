@@ -314,6 +314,25 @@ describe("Linux sandbox agent request boundary", () => {
     expect(manager.calls).toEqual(["readSafeLogTail"]);
     await agent.close();
   });
+
+  it("preserves an earlier safe truncation marker from the workload manager", async () => {
+    const manager = new FakeWorkloadManager();
+    manager.readSafeLogTail = async () => ({
+      lines: ["latest safe line"],
+      lineCount: 1,
+      characterCount: 16,
+      truncated: true,
+    });
+    const agent = await startTestAgent(manager);
+
+    const response = await agentFetch(agent, "/v1/workload/logs");
+
+    await expect(response.json()).resolves.toMatchObject({
+      lines: ["latest safe line"],
+      truncated: true,
+    });
+    await agent.close();
+  });
 });
 
 describe("Linux sandbox agent fixed operations", () => {
