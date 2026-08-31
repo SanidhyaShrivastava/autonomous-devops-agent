@@ -12,4 +12,5 @@
 - A visitor can now trigger one disposable Linux-service failure and watch the agent investigate, restart, independently verify, and persist the real recovery trace.
 - A visitor can now see the verified outcome before collapsed raw evidence, with truthful policy and operation labels and no public model-login metadata.
 - A visitor can now receive fresh recovery state every second during an accepted run, with the refresh stopping as soon as the new run reaches its final result.
-- A visitor now sees a server-persisted failed result within seconds if the Linux runner disappears; the failure survives reload, the returning runner restores the disposable service automatically, and a fresh run can complete normally.
+- A visitor now sees a server-persisted failed result within seconds if the trusted coordinator disappears; the failure survives reload, the returning coordinator restores the disposable service automatically, and a fresh run can complete normally.
+- A visitor can now watch the same nine-step recovery run through an authenticated, unprivileged Linux sandbox agent with truthful Linux operation labels and no host mounts or Docker socket.
