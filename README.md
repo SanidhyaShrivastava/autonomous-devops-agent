@@ -3,7 +3,7 @@
 A GrowthX Build Week project proving a bounded operational recovery loop: detect a failed Linux workload, investigate it, execute one permitted recovery action, and independently verify health.
 
 - Public app: https://autonomous-devops-agent.vercel.app
-- Status: the complete M1 recovery loop is live. Fresh post-cutover public runs now pass through an authenticated Linux sandbox agent instead of direct host-side Docker control.
+- Status: the complete M1 recovery loop is live, and a signed-in owner can now pair one separate Linux runner for heartbeat-only connectivity. The paired runner has no service, log, file, shell, or recovery authority yet.
 - Surface: Sanidhya-owned disposable Linux sandbox in Docker only. Current evidence is controlled/staged and cannot support an L4 or L5 real-output claim.
 
 ## Hybrid autonomy proof
@@ -57,6 +57,21 @@ On Tue 1 Sep 2026, the production coordinator was cut over to the isolated Linux
 - Any future real-user environment remains approval-first until action-level trust is validated.
 - The staged public demo offers both an automatic policy-checked path and a browser approval path for the same fixed action; neither path grants arbitrary authority.
 
+## Owner-bound Linux runner onboarding
+
+The private preview at `/servers/new` now proves the first real-user connection step:
+
+1. Create an operator account or sign in.
+2. Enter a private runner label and confirm permission to connect the server.
+3. Create a one-time pairing code; only its digest is stored in Convex and the code expires after 10 minutes.
+4. On the non-sensitive Linux host, clone this repository, run `npm install`, then run `npm run host:pair` and paste the code.
+5. Run `npm run host:connect`; the browser shows the runner online after its outbound two-second heartbeat arrives.
+6. Revoke access from the browser when needed; the saved runner credential is then rejected.
+
+This onboarding release is deliberately heartbeat-only. The agent does not discover services, accept commands, read logs or files, or execute recovery actions. Pairing and heartbeat requests use shared, bounded Convex rate limits rather than temporary per-web-process counters. The Build Week password login has no reset-email flow yet, so it must not reuse an important password.
+
+Live verification used one disposable Debian Linux container and one clearly named test-only account. Pairing, heartbeat state after reload, phone layout at 390 pixels, credential revocation, fresh-pairing availability, and sign-out all passed. That test account and its revoked runner are test evidence and must not be counted as a user or signup.
+
 ## Local verification
 
 Docker Desktop must be running. These commands build and exercise only the fixed disposable container:
@@ -88,14 +103,20 @@ Keep every value in only the places listed here:
 |---|---:|---:|---:|
 | `DEMO_REQUEST_SECRET` | Yes | Yes | No |
 | `RUNNER_TOKEN` | Yes | No | Yes |
+| `RUNNER_PAIRING_REQUEST_SECRET` | Yes | Yes | No |
+| `JWT_PRIVATE_KEY` | Yes | No | No |
+| `JWKS` | Yes | No | No |
+| `SITE_URL` | Yes | No | No |
 | `CONVEX_DEPLOY_KEY` | No | Yes | No |
 | `CONVEX_URL` | No | Yes | Yes |
 | `PUBLIC_APP_URL` | No | Yes | Yes |
 | `RUNNER_ID` | No | No | Yes |
 
-- Generate different random 32-byte values for `DEMO_REQUEST_SECRET` and `RUNNER_TOKEN`.
+- Generate different random values for `DEMO_REQUEST_SECRET`, `RUNNER_TOKEN`, and `RUNNER_PAIRING_REQUEST_SECRET`.
 - `DEMO_REQUEST_SECRET` must be identical in Convex and Vercel.
 - `RUNNER_TOKEN` must be identical in Convex and `.env.runner.local`.
+- `RUNNER_PAIRING_REQUEST_SECRET` must be identical in Convex and Vercel.
+- `JWT_PRIVATE_KEY`, `JWKS`, and `SITE_URL` belong only in Convex and support owner authentication.
 - `CONVEX_DEPLOY_KEY` must be a production Convex deployment key with deployment permission.
 - Never prefix a secret with `NEXT_PUBLIC_`; values with that prefix can be sent to the browser.
 - Never commit `.env.runner.local`; `.env*` is ignored except for the empty `.env.example` template.

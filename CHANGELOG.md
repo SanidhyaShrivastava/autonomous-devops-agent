@@ -16,3 +16,4 @@
 - A visitor can now watch the same nine-step recovery run through an authenticated, unprivileged Linux sandbox agent with truthful Linux operation labels and no host mounts or Docker socket.
 - A visitor can now choose automatic recovery or pause the same fixed restart for a durable browser approve/reject decision, while other browsers remain read-only and rejection restores the disposable service without executing recovery.
 - A visitor can now take time to review an approval request and still complete the restart and fresh verification without the earlier run timer expiring during that human wait.
+- A signed-in engineer can now pair one non-sensitive Linux runner with a one-time owner-bound code, see its live heartbeat, and revoke its credential without enabling logs or recovery actions.
