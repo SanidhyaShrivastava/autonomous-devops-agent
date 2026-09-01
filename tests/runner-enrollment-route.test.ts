@@ -369,6 +369,40 @@ describe("runner enrollment routes", () => {
     );
   });
 
+  it("returns a generic no-store conflict for an opaque result ID instead of a 500", async () => {
+    serverMock.recordRunnerHeartbeat.mockResolvedValue({
+      status: "accepted",
+      heartbeatIntervalMs: 2_000,
+      workloadRegistered: true,
+      command: null,
+      resultDisposition: "rejected",
+    });
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        {
+          agentVersion: "0.2.0",
+          runnerId: RUNNER_ID,
+          previousCommandResult: {
+            commandId: "not_a_convex_document_id",
+            executionNonce: EXECUTION_NONCE,
+            actionId: ACTION_ID,
+            executionResultCode: "restart_failed",
+            verificationStatus: "unhealthy",
+            verificationDetailCode: "request_timeout",
+          },
+        },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+
+    expect(response.status).toBe(409);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(await response.json()).toEqual({
+      error: "Command result was not accepted",
+    });
+  });
+
   it("accepts the largest request allowed by the heartbeat protocol", async () => {
     const body = {
       agentVersion: "v".repeat(32),

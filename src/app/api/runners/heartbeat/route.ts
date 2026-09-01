@@ -79,6 +79,9 @@ export async function POST(request: Request) {
         { "Retry-After": String(result.retryAfterSeconds) },
       );
     }
+    if (result.resultDisposition === "rejected") {
+      return json({ error: "Command result was not accepted" }, 409);
+    }
 
     const responseBody = connectedRunnerHeartbeatResponseSchema.parse({
       heartbeatIntervalMs: result.heartbeatIntervalMs,

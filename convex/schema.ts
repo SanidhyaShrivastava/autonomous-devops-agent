@@ -235,6 +235,7 @@ export default defineSchema({
     stateVersion: v.number(),
   })
     .index("by_workload_created_at", ["workloadRecordId", "createdAt"])
+    .index("by_workload_finished_at", ["workloadRecordId", "finishedAt"])
     .index("by_runner_status_created_at", ["runnerId", "status", "createdAt"])
     .index("by_status_deadline", ["status", "deadlineAt"]),
 

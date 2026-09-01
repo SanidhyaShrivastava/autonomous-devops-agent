@@ -15,6 +15,7 @@ import {
   CONNECTED_RECOVERY_ACTION_ID,
   CONNECTED_RUNNER_CAPABILITY_ID,
   CONNECTED_WORKLOAD_ID,
+  type ConnectedCommandResultDisposition,
 } from "../src/lib/connected-runner-protocol";
 
 const runnerArchitecture = v.union(
@@ -24,6 +25,7 @@ const runnerArchitecture = v.union(
 
 const DIGEST_PATTERN = /^[a-f0-9]{64}$/;
 const AGENT_VERSION_PATTERN = /^[A-Za-z0-9._-]{1,32}$/;
+const OPAQUE_IDENTIFIER_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 export const RUNNER_PAIRING_WINDOW_MS = 10 * 60_000;
 const RATE_LIMIT_WINDOW_MS = 60_000;
 const PAIR_ATTEMPT_LIMIT = 10;
@@ -37,6 +39,13 @@ export const CONNECTED_APPROVAL_WINDOW_MS = 5 * 60_000;
 export const CONNECTED_APPROVED_WINDOW_MS = 30_000;
 export const CONNECTED_CLAIM_LEASE_MS = 15_000;
 export const CONNECTED_WATCHDOG_BATCH_SIZE = 25;
+// Five requests per owner/workload in ten minutes keeps approval spam bounded.
+export const CONNECTED_RECOVERY_REQUEST_LIMIT = 5;
+export const CONNECTED_RECOVERY_REQUEST_WINDOW_MS = 10 * 60_000;
+// Keep the newest 50 completed requests; active work is never in this index scan.
+export const CONNECTED_TERMINAL_HISTORY_LIMIT = 50;
+const CONNECTED_TERMINAL_HISTORY_CLEANUP_BATCH_SIZE = 100;
+const CONNECTED_TERMINAL_HISTORY_CLEANUP_MAX_BATCHES = 10;
 
 const connectedHealthDetailCode = v.union(
   v.literal("exact_http_200"),
@@ -54,7 +63,7 @@ const connectedHealthReport = v.object({
 });
 
 const connectedCommandResult = v.object({
-  commandId: v.id("runnerRecoveryRequests"),
+  commandId: v.string(),
   executionNonce: v.string(),
   actionId: v.literal(CONNECTED_RECOVERY_ACTION_ID),
   executionResultCode: v.union(
@@ -110,7 +119,7 @@ function connectedRecoveryDto(recovery: Doc<"runnerRecoveryRequests">) {
   };
 }
 
-function requireFixedHealthEvidence(
+function fixedHealthEvidenceIsValid(
   report: {
     healthStatus: "healthy" | "unhealthy";
     detailCode:
@@ -120,7 +129,6 @@ function requireFixedHealthEvidence(
       | "unexpected_response";
     instanceId?: string;
   },
-  label: "health" | "verification",
 ) {
   const exactHealthy =
     report.healthStatus === "healthy" &&
@@ -131,7 +139,14 @@ function requireFixedHealthEvidence(
     report.healthStatus === "unhealthy" &&
     report.detailCode !== "exact_http_200" &&
     report.instanceId === undefined;
-  if (!exactHealthy && !exactUnhealthy) {
+  return exactHealthy || exactUnhealthy;
+}
+
+function requireFixedHealthEvidence(
+  report: Parameters<typeof fixedHealthEvidenceIsValid>[0],
+  label: "health" | "verification",
+) {
+  if (!fixedHealthEvidenceIsValid(report)) {
     rejectWithCode(`INVALID_CONNECTED_${label.toUpperCase()}_EVIDENCE`);
   }
 }
@@ -231,8 +246,9 @@ async function rateLimitControl(ctx: MutationCtx) {
 
 async function consumeRateLimitBucket(
   ctx: MutationCtx,
-  args: { bucketKey: string; limit: number; now: number },
+  args: { bucketKey: string; limit: number; now: number; windowMs?: number },
 ): Promise<RateLimitResult> {
+  const windowMs = args.windowMs ?? RATE_LIMIT_WINDOW_MS;
   const existing = await ctx.db
     .query("runnerRateLimitBuckets")
     .withIndex("by_bucket_key", (q) => q.eq("bucketKey", args.bucketKey))
@@ -243,7 +259,7 @@ async function consumeRateLimitBucket(
       await ctx.db.patch(existing._id, {
         count: 1,
         deniedCount: 0,
-        expiresAt: args.now + RATE_LIMIT_WINDOW_MS,
+        expiresAt: args.now + windowMs,
         failedCount: 0,
         windowStartedAt: args.now,
       });
@@ -282,7 +298,7 @@ async function consumeRateLimitBucket(
     bucketKey: args.bucketKey,
     count: 1,
     deniedCount: 0,
-    expiresAt: args.now + RATE_LIMIT_WINDOW_MS,
+    expiresAt: args.now + windowMs,
     failedCount: 0,
     windowStartedAt: args.now,
   });
@@ -298,6 +314,57 @@ async function recordRateLimitFailure(ctx: MutationCtx, bucketKey: string) {
   if (bucket) {
     await ctx.db.patch(bucket._id, { failedCount: bucket.failedCount + 1 });
   }
+}
+
+async function reserveTerminalRecoveryHistorySlot(
+  ctx: MutationCtx,
+  workloadRecordId: Id<"managedWorkloads">,
+) {
+  for (
+    let batch = 0;
+    batch < CONNECTED_TERMINAL_HISTORY_CLEANUP_MAX_BATCHES;
+    batch += 1
+  ) {
+    const newestTerminalRecoveries = await ctx.db
+      .query("runnerRecoveryRequests")
+      .withIndex("by_workload_finished_at", (q) =>
+        q.eq("workloadRecordId", workloadRecordId).gt("finishedAt", 0),
+      )
+      .order("desc")
+      .take(CONNECTED_TERMINAL_HISTORY_CLEANUP_BATCH_SIZE);
+
+    if (
+      newestTerminalRecoveries.length < CONNECTED_TERMINAL_HISTORY_LIMIT
+    ) {
+      return;
+    }
+
+    // Reserve one of the 50 slots for the request being created. The index
+    // only contains rows with a finish timestamp, so active work is never
+    // selected. Re-querying lets an oversized preexisting history converge
+    // while keeping every one of the newest 49 audit records.
+    for (const recovery of newestTerminalRecoveries.slice(
+      CONNECTED_TERMINAL_HISTORY_LIMIT - 1,
+    )) {
+      await ctx.db.delete(recovery._id);
+    }
+  }
+
+  const remainingTerminalRecoveries = await ctx.db
+    .query("runnerRecoveryRequests")
+    .withIndex("by_workload_finished_at", (q) =>
+      q.eq("workloadRecordId", workloadRecordId).gt("finishedAt", 0),
+    )
+    .order("desc")
+    .take(CONNECTED_TERMINAL_HISTORY_LIMIT);
+  if (remainingTerminalRecoveries.length < CONNECTED_TERMINAL_HISTORY_LIMIT) {
+    return;
+  }
+
+  // Do not create another record unless the cap was established. Convex rolls
+  // back this bounded cleanup on error, so unusually large legacy histories
+  // need an explicit maintenance pass rather than an unbounded mutation.
+  rejectWithCode("RECOVERY_HISTORY_CLEANUP_REQUIRED");
 }
 
 export const createEnrollment = mutation({
@@ -509,6 +576,18 @@ export const requestFixedRecovery = mutation({
     if (latest && ACTIVE_RECOVERY_STATUSES.has(latest.status)) {
       rejectWithCode("RECOVERY_ALREADY_ACTIVE");
     }
+
+    const requestRateLimit = await consumeRateLimitBucket(ctx, {
+      bucketKey: `fixed_recovery:${String(ownerId)}:${String(workload._id)}`,
+      limit: CONNECTED_RECOVERY_REQUEST_LIMIT,
+      now,
+      windowMs: CONNECTED_RECOVERY_REQUEST_WINDOW_MS,
+    });
+    if (!requestRateLimit.allowed) {
+      rejectWithCode("RECOVERY_REQUEST_RATE_LIMITED");
+    }
+
+    await reserveTerminalRecoveryHistorySlot(ctx, workload._id);
 
     const commandId = await ctx.db.insert("runnerRecoveryRequests", {
       ownerId,
@@ -779,63 +858,77 @@ export const recordHeartbeat = mutation({
     });
 
     let workload = await workloadForRunnerRecord(ctx, runner._id);
+    let resultDisposition: ConnectedCommandResultDisposition =
+      args.previousCommandResult ? "rejected" : "none";
 
     if (args.previousCommandResult) {
       const result = args.previousCommandResult;
-      requireFixedHealthEvidence(
-        {
-          healthStatus: result.verificationStatus,
-          detailCode: result.verificationDetailCode,
-          instanceId: result.postActionInstanceId,
-        },
-        "verification",
-      );
-      const recovery = await ctx.db.get(result.commandId);
+      const resultEvidence = {
+        healthStatus: result.verificationStatus,
+        detailCode: result.verificationDetailCode,
+        instanceId: result.postActionInstanceId,
+      };
+      const normalizedCommandId =
+        OPAQUE_IDENTIFIER_PATTERN.test(result.commandId) &&
+        OPAQUE_IDENTIFIER_PATTERN.test(result.executionNonce)
+          ? ctx.db.normalizeId("runnerRecoveryRequests", result.commandId)
+          : null;
+      const recovery = normalizedCommandId
+        ? await ctx.db.get(normalizedCommandId)
+        : null;
       if (
-        !recovery ||
-        !workload ||
-        recovery.runnerRecordId !== runner._id ||
-        recovery.workloadRecordId !== workload._id ||
-        recovery.actionId !== result.actionId
+        recovery &&
+        fixedHealthEvidenceIsValid(resultEvidence) &&
+        recovery.executionNonce === result.executionNonce &&
+        workload &&
+        recovery.runnerRecordId === runner._id &&
+        recovery.workloadRecordId === workload._id &&
+        recovery.actionId === result.actionId
       ) {
-        rejectWithCode("COMMAND_RESULT_UNAVAILABLE");
-      }
+        if (recovery.status === "claimed") {
+          const verifiedNewInstance =
+            result.executionResultCode === "restart_succeeded" &&
+            result.verificationStatus === "healthy" &&
+            result.verificationDetailCode === "exact_http_200" &&
+            result.postActionInstanceId !== undefined &&
+            result.postActionInstanceId !== recovery.preActionInstanceId;
+          const terminalStatus = verifiedNewInstance ? "succeeded" : "failed";
+          const terminalReason = verifiedNewInstance
+            ? undefined
+            : result.executionResultCode === "restart_failed"
+              ? ("execution_failed" as const)
+              : ("verification_failed" as const);
 
-      if (!ACTIVE_RECOVERY_STATUSES.has(recovery.status)) {
-        // A repeated or late result must not reopen a terminal recovery.
-      } else {
-        if (
-          recovery.status !== "claimed" ||
-          recovery.executionNonce !== result.executionNonce
+          await ctx.db.patch(recovery._id, {
+            status: terminalStatus,
+            executionResultCode: result.executionResultCode,
+            verificationStatus: result.verificationStatus,
+            verificationDetailCode: result.verificationDetailCode,
+            ...(result.postActionInstanceId
+              ? { postActionInstanceId: result.postActionInstanceId }
+              : {}),
+            ...(terminalReason ? { terminalReason } : {}),
+            finishedAt: now,
+            stateVersion: recovery.stateVersion + 1,
+          });
+          resultDisposition = "accepted";
+        } else if (
+          recovery.status === "succeeded" ||
+          recovery.status === "failed"
         ) {
-          rejectWithCode("COMMAND_RESULT_UNAVAILABLE");
+          const exactStoredResult =
+            recovery.executionResultCode === result.executionResultCode &&
+            recovery.verificationStatus === result.verificationStatus &&
+            recovery.verificationDetailCode ===
+              result.verificationDetailCode &&
+            (recovery.postActionInstanceId ?? null) ===
+              (result.postActionInstanceId ?? null);
+          resultDisposition = exactStoredResult ? "duplicate" : "rejected";
+        } else if (recovery.status === "execution_unknown") {
+          // The matching late result is acknowledged, but this terminal state
+          // is intentionally never rewritten because execution was uncertain.
+          resultDisposition = "ignored";
         }
-
-        const verifiedNewInstance =
-          result.executionResultCode === "restart_succeeded" &&
-          result.verificationStatus === "healthy" &&
-          result.verificationDetailCode === "exact_http_200" &&
-          result.postActionInstanceId !== undefined &&
-          result.postActionInstanceId !== recovery.preActionInstanceId;
-        const terminalStatus = verifiedNewInstance ? "succeeded" : "failed";
-        const terminalReason = verifiedNewInstance
-          ? undefined
-          : result.executionResultCode === "restart_failed"
-            ? ("execution_failed" as const)
-            : ("verification_failed" as const);
-
-        await ctx.db.patch(recovery._id, {
-          status: terminalStatus,
-          executionResultCode: result.executionResultCode,
-          verificationStatus: result.verificationStatus,
-          verificationDetailCode: result.verificationDetailCode,
-          ...(result.postActionInstanceId
-            ? { postActionInstanceId: result.postActionInstanceId }
-            : {}),
-          ...(terminalReason ? { terminalReason } : {}),
-          finishedAt: now,
-          stateVersion: recovery.stateVersion + 1,
-        });
       }
     }
 
@@ -863,6 +956,7 @@ export const recordHeartbeat = mutation({
     } | null = null;
 
     if (
+      resultDisposition !== "rejected" &&
       workload &&
       args.healthReport &&
       args.capabilityId === CONNECTED_RUNNER_CAPABILITY_ID
@@ -937,6 +1031,7 @@ export const recordHeartbeat = mutation({
       heartbeatIntervalMs: 2_000 as const,
       workloadRegistered: workload !== null,
       command,
+      resultDisposition,
     };
   },
 });

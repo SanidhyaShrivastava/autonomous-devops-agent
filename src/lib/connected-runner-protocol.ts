@@ -98,6 +98,14 @@ export const connectedCommandResultSchema = z
     }
   });
 
+export const connectedCommandResultDispositionSchema = z.enum([
+  "none",
+  "accepted",
+  "duplicate",
+  "ignored",
+  "rejected",
+]);
+
 export const connectedRunnerHeartbeatRequestSchema = z
   .object({
     runnerId: z.string().regex(/^gxr_[A-Za-z0-9_-]{24}$/),
@@ -124,4 +132,7 @@ export type ConnectedRecoveryCommand = z.infer<
 >;
 export type ConnectedCommandResult = z.infer<
   typeof connectedCommandResultSchema
+>;
+export type ConnectedCommandResultDisposition = z.infer<
+  typeof connectedCommandResultDispositionSchema
 >;

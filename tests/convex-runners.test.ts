@@ -39,6 +39,8 @@ const CONNECTED_CAPABILITY_ID = "fixed_disposable_service_v1";
 const CONNECTED_WORKLOAD_ID = "connected-demo-service";
 const CONNECTED_HEALTH_CHECK_ID = "check-connected-demo-service-health";
 const CONNECTED_RECOVERY_ACTION_ID = "restart-connected-demo-service";
+const CONNECTED_RECOVERY_REQUEST_LIMIT = 5;
+const CONNECTED_TERMINAL_HISTORY_LIMIT = 50;
 
 type Harness = TestConvex<typeof schema>;
 
@@ -474,6 +476,47 @@ describe("owner-bound runner pairing", () => {
     ).resolves.toMatchObject({ status: "accepted" });
   });
 
+  it("authenticates and rate-limits before normalizing an opaque result command ID", async () => {
+    const t = convexTest(schema, modules);
+    await createConnectedRunner(t, "opaque-id-owner");
+    const invalidResult = {
+      commandId: "not_a_convex_document_id",
+      executionNonce: "bounded_nonce",
+      actionId: CONNECTED_RECOVERY_ACTION_ID,
+      executionResultCode: "restart_failed",
+      verificationStatus: "unhealthy",
+      verificationDetailCode: "request_timeout",
+    };
+
+    await expect(
+      t.mutation(recordHeartbeat, {
+        agentVersion: "0.2.0",
+        clientAddressDigest: CLIENT_ADDRESS_DIGEST,
+        credentialDigest: OTHER_CREDENTIAL_DIGEST,
+        previousCommandResult: invalidResult,
+        requestSecret: SERVER_SECRET,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    expect(
+      await t.run((ctx) =>
+        ctx.db
+          .query("runnerRateLimitBuckets")
+          .withIndex("by_bucket_key", (q) =>
+            q.eq("bucketKey", `heartbeat_ip:${CLIENT_ADDRESS_DIGEST}`),
+          )
+          .unique(),
+      ),
+    ).toMatchObject({ count: 1, failedCount: 1 });
+
+    await expect(
+      connectedHeartbeat(t, { previousCommandResult: invalidResult }),
+    ).resolves.toMatchObject({
+      status: "accepted",
+      resultDisposition: "rejected",
+    });
+  });
+
   it("requires a fresh fixed capability and registers one safe owner-bound workload", async () => {
     const t = convexTest(schema, modules);
     const owner = await createConnectedRunner(t);
@@ -515,6 +558,87 @@ describe("owner-bound runner pairing", () => {
     expect(
       await t.run((ctx) => ctx.db.query("managedWorkloads").collect()),
     ).toHaveLength(1);
+  });
+
+  it("rate-limits owner recovery requests without counting rejected attempts as new rows", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await registerConnectedWorkload(t, "request-rate-owner");
+    await connectedHeartbeat(t, {
+      healthReport: fixedHealth("healthy", "rate-limit-instance"),
+    });
+    await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+
+    for (let attempt = 0; attempt < CONNECTED_RECOVERY_REQUEST_LIMIT; attempt += 1) {
+      const request = await owner.client.mutation(requestFixedRecovery, {});
+      await owner.client.mutation(decideFixedRecovery, {
+        commandId: request.commandId,
+        decision: "rejected",
+      });
+    }
+    await expect(
+      owner.client.mutation(requestFixedRecovery, {}),
+    ).rejects.toThrow(/RECOVERY_REQUEST_RATE_LIMITED/);
+    expect(
+      await t.run((ctx) => ctx.db.query("runnerRecoveryRequests").collect()),
+    ).toHaveLength(CONNECTED_RECOVERY_REQUEST_LIMIT);
+  });
+
+  it("keeps only the newest bounded terminal recovery audit records", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await registerConnectedWorkload(t, "history-owner");
+    await connectedHeartbeat(t, {
+      healthReport: fixedHealth("healthy", "history-instance"),
+    });
+    await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+
+    const seededStart = BASE_TIME - 10_000;
+    await t.run(async (ctx) => {
+      const runner = await ctx.db
+        .query("registeredRunners")
+        .withIndex("by_runner_id", (q) => q.eq("runnerId", RUNNER_ID))
+        .unique();
+      if (!runner) throw new Error("Runner missing in retention setup");
+      const workload = await ctx.db
+        .query("managedWorkloads")
+        .withIndex("by_runner_record", (q) =>
+          q.eq("runnerRecordId", runner._id),
+        )
+        .unique();
+      if (!workload) throw new Error("Workload missing in retention setup");
+
+      for (let index = 0; index < 155; index += 1) {
+        await ctx.db.insert("runnerRecoveryRequests", {
+          ownerId: owner.ownerId,
+          workloadRecordId: workload._id,
+          runnerRecordId: runner._id,
+          runnerId: runner.runnerId,
+          workloadId: CONNECTED_WORKLOAD_ID,
+          actionId: CONNECTED_RECOVERY_ACTION_ID,
+          status: "rejected",
+          createdAt: seededStart + index,
+          deadlineAt: seededStart + index,
+          preActionInstanceId: "history-instance",
+          approvalDecidedAt: seededStart + index,
+          terminalReason: "owner_rejected",
+          finishedAt: seededStart + index,
+          stateVersion: 1,
+        });
+      }
+    });
+
+    const request = await owner.client.mutation(requestFixedRecovery, {});
+    await owner.client.mutation(decideFixedRecovery, {
+      commandId: request.commandId,
+      decision: "rejected",
+    });
+    const terminal = (
+      await t.run((ctx) => ctx.db.query("runnerRecoveryRequests").collect())
+    )
+      .filter((recovery) => recovery.finishedAt !== undefined)
+      .sort((left, right) => left.createdAt - right.createdAt);
+    expect(terminal).toHaveLength(CONNECTED_TERMINAL_HISTORY_LIMIT);
+    expect(terminal[0]?.createdAt).toBe(seededStart + 106);
+    expect(terminal.at(-1)?.createdAt).toBe(BASE_TIME);
   });
 
   it("accepts health only from the matching runner and keeps recovery approval-first", async () => {
@@ -680,10 +804,11 @@ describe("owner-bound runner pairing", () => {
         healthReport: fixedHealth("healthy", "instance-after-recovery"),
       }),
     ).rejects.toThrow();
-    await connectedHeartbeat(t, {
+    const accepted = await connectedHeartbeat(t, {
       previousCommandResult: result,
       healthReport: fixedHealth("healthy", "instance-after-recovery"),
     });
+    expect(accepted).toMatchObject({ resultDisposition: "accepted" });
     const completed = (await owner.client.query(listMine, {})).latestRecovery;
     expect(completed).toMatchObject({
       status: "succeeded",
@@ -698,13 +823,98 @@ describe("owner-bound runner pairing", () => {
       lastHealthyInstanceId: "instance-after-recovery",
     });
 
-    await connectedHeartbeat(t, {
+    const duplicate = await connectedHeartbeat(t, {
       previousCommandResult: result,
       healthReport: fixedHealth("healthy", "instance-after-recovery"),
     });
+    expect(duplicate).toMatchObject({ resultDisposition: "duplicate" });
     expect((await owner.client.query(listMine, {})).latestRecovery).toEqual(
       completed,
     );
+
+    await expect(
+      connectedHeartbeat(t, {
+        previousCommandResult: {
+          ...result,
+          executionNonce: "wrong_terminal_nonce",
+        },
+        healthReport: fixedHealth("healthy", "instance-after-recovery"),
+      }),
+    ).resolves.toMatchObject({ resultDisposition: "rejected" });
+    await expect(
+      connectedHeartbeat(t, {
+        previousCommandResult: {
+          commandId: result.commandId,
+          executionNonce: result.executionNonce,
+          actionId: result.actionId,
+          executionResultCode: "restart_failed",
+          verificationStatus: "unhealthy",
+          verificationDetailCode: "connection_failed",
+        },
+        healthReport: fixedHealth("healthy", "instance-after-recovery"),
+      }),
+    ).resolves.toMatchObject({ resultDisposition: "rejected" });
+    expect((await owner.client.query(listMine, {})).latestRecovery).toEqual(
+      completed,
+    );
+  });
+
+  it("does not hide a newly claimed command behind a rejected prior result", async () => {
+    const t = convexTest(schema, modules);
+    const { owner, request: firstRequest } = await createPendingRecovery(
+      t,
+      "rejected-result-claim-owner",
+    );
+    await owner.client.mutation(decideFixedRecovery, {
+      commandId: firstRequest.commandId,
+      decision: "approved",
+    });
+    const firstClaim = await connectedHeartbeat(t, {
+      healthReport: fixedHealth("unhealthy"),
+    });
+    const firstResult = {
+      commandId: firstRequest.commandId,
+      executionNonce: firstClaim.command.executionNonce,
+      actionId: CONNECTED_RECOVERY_ACTION_ID,
+      executionResultCode: "restart_succeeded",
+      verificationStatus: "healthy",
+      verificationDetailCode: "exact_http_200",
+      postActionInstanceId: "instance-after-first-recovery",
+    };
+    await connectedHeartbeat(t, {
+      previousCommandResult: firstResult,
+      healthReport: fixedHealth("healthy", "instance-after-first-recovery"),
+    });
+
+    await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+    const secondRequest = await owner.client.mutation(requestFixedRecovery, {});
+    await owner.client.mutation(decideFixedRecovery, {
+      commandId: secondRequest.commandId,
+      decision: "approved",
+    });
+
+    const rejectedHeartbeat = await connectedHeartbeat(t, {
+      previousCommandResult: {
+        ...firstResult,
+        executionNonce: "wrong_old_nonce",
+      },
+      healthReport: fixedHealth("unhealthy"),
+    });
+    expect(rejectedHeartbeat).toMatchObject({
+      command: null,
+      resultDisposition: "rejected",
+    });
+    expect((await owner.client.query(listMine, {})).latestRecovery).toMatchObject({
+      commandId: secondRequest.commandId,
+      status: "approved",
+    });
+
+    await expect(
+      connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") }),
+    ).resolves.toMatchObject({
+      command: { commandId: secondRequest.commandId },
+      resultDisposition: "none",
+    });
   });
 
   it("never treats process success with unhealthy verification as recovery", async () => {
@@ -830,7 +1040,7 @@ describe("owner-bound runner pairing", () => {
       commandId: claimed.request.commandId,
       decision: "approved",
     });
-    await connectedHeartbeat(claimedHarness, {
+    const claimedCommand = await connectedHeartbeat(claimedHarness, {
       healthReport: fixedHealth("unhealthy"),
     });
     vi.setSystemTime(BASE_TIME + 15_000);
@@ -841,6 +1051,34 @@ describe("owner-bound runner pairing", () => {
       status: "execution_unknown",
       terminalReason: "runner_lost_during_action",
     });
+
+    const lateResult = {
+      commandId: claimed.request.commandId,
+      executionNonce: claimedCommand.command.executionNonce,
+      actionId: CONNECTED_RECOVERY_ACTION_ID,
+      executionResultCode: "restart_succeeded",
+      verificationStatus: "healthy",
+      verificationDetailCode: "exact_http_200",
+      postActionInstanceId: "late-instance",
+    };
+    await expect(
+      connectedHeartbeat(claimedHarness, {
+        previousCommandResult: lateResult,
+        healthReport: fixedHealth("healthy", "late-instance"),
+      }),
+    ).resolves.toMatchObject({ resultDisposition: "ignored" });
+    await expect(
+      connectedHeartbeat(claimedHarness, {
+        previousCommandResult: {
+          ...lateResult,
+          executionNonce: "wrong_late_nonce",
+        },
+        healthReport: fixedHealth("healthy", "late-instance"),
+      }),
+    ).resolves.toMatchObject({ resultDisposition: "rejected" });
+    expect(
+      (await claimed.owner.client.query(listMine, {})).latestRecovery,
+    ).toMatchObject({ status: "execution_unknown" });
   });
 
   it("cannot approve a pending request at its exact deadline", async () => {
