@@ -2,7 +2,7 @@ import { createHash, randomBytes } from "node:crypto";
 
 import { pairRunner } from "@/lib/server/runner-enrollment";
 import { isJsonContentType, readLimitedBody } from "@/lib/server/http-body";
-import { checkRequestRateLimit } from "@/lib/server/request-rate-limit";
+import { runnerClientAddressDigest } from "@/lib/server/runner-client-address";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -69,22 +69,10 @@ export async function POST(request: Request) {
       return json({ error: "Request body is invalid" }, 400);
     }
 
-    const rateLimit = checkRequestRateLimit({
-      request,
-      scope: "pair",
-      limit: 10,
-    });
-    if (!rateLimit.allowed) {
-      return json(
-        { error: "Too many pairing attempts" },
-        429,
-        { "Retry-After": String(rateLimit.retryAfterSeconds) },
-      );
-    }
-
     const credential = `gxrun_${randomBytes(32).toString("base64url")}`;
     const runnerId = `gxr_${randomBytes(18).toString("base64url")}`;
     const result = await pairRunner({
+      clientAddressDigest: runnerClientAddressDigest(request),
       codeDigest: sha256(parsed.data.pairingCode),
       credentialDigest: sha256(credential),
       runnerId,
@@ -94,6 +82,13 @@ export async function POST(request: Request) {
 
     if (result.status === "unavailable") {
       return json({ error: "Pairing failed" }, 401);
+    }
+    if (result.status === "rate_limited") {
+      return json(
+        { error: "Too many pairing attempts" },
+        429,
+        { "Retry-After": String(result.retryAfterSeconds) },
+      );
     }
 
     return json(

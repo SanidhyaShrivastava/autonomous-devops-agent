@@ -22,6 +22,7 @@ const recordHeartbeat = makeFunctionReference<"mutation">(
   "runners:recordHeartbeat",
 );
 const revoke = makeFunctionReference<"mutation">("runners:revoke");
+const CLIENT_ADDRESS_DIGEST = "e".repeat(64);
 
 type Harness = TestConvex<typeof schema>;
 
@@ -33,16 +34,6 @@ async function addOwner(t: Harness, suffix: string) {
     ownerId,
     client: t.withIdentity({ subject: `${ownerId}|session-${suffix}` }),
   };
-}
-
-async function expectCode(operation: Promise<unknown>, code: string) {
-  try {
-    await operation;
-  } catch (error) {
-    expect(error).toMatchObject({ data: { code } });
-    return;
-  }
-  throw new Error(`Expected ${code}`);
 }
 
 async function createPendingEnrollment(
@@ -64,6 +55,7 @@ async function consumeEnrollment(
     architecture: "arm64",
     codeDigest: CODE_DIGEST,
     credentialDigest: CREDENTIAL_DIGEST,
+    clientAddressDigest: CLIENT_ADDRESS_DIGEST,
     requestSecret: SERVER_SECRET,
     runnerId: RUNNER_ID,
     ...overrides,
@@ -119,6 +111,9 @@ describe("owner-bound runner pairing", () => {
       ctx.db.query("registeredRunners").collect(),
     );
     expect(documents).toHaveLength(0);
+    expect(
+      await t.run((ctx) => ctx.db.query("runnerRateLimitBuckets").collect()),
+    ).toHaveLength(0);
   });
 
   it("expires after ten minutes and consumes a fresh code only once", async () => {
@@ -127,18 +122,35 @@ describe("owner-bound runner pairing", () => {
     await createPendingEnrollment(owner.client);
 
     vi.setSystemTime(BASE_TIME + 10 * 60_000);
-    await expectCode(consumeEnrollment(t), "PAIRING_UNAVAILABLE");
+    await expect(consumeEnrollment(t)).resolves.toEqual({
+      status: "unavailable",
+    });
 
     await createPendingEnrollment(owner.client, OTHER_CODE_DIGEST);
     const paired = await consumeEnrollment(t, {
       codeDigest: OTHER_CODE_DIGEST,
     });
-    expect(paired).toMatchObject({ label: "staging-web-1", runnerId: RUNNER_ID });
+    expect(paired).toMatchObject({
+      label: "staging-web-1",
+      runnerId: RUNNER_ID,
+      status: "paired",
+    });
 
-    await expectCode(
+    await expect(
       consumeEnrollment(t, { codeDigest: OTHER_CODE_DIGEST }),
-      "PAIRING_UNAVAILABLE",
-    );
+    ).resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("shows an enrollment as expired at the exact expiry instant", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await addOwner(t, "owner");
+    await createPendingEnrollment(owner.client);
+
+    vi.setSystemTime(BASE_TIME + 10 * 60_000);
+
+    expect(await owner.client.query(listMine, {})).toMatchObject({
+      enrollment: { state: "expired" },
+    });
   });
 
   it("allows only one winner when the same code is claimed concurrently", async () => {
@@ -154,7 +166,19 @@ describe("owner-bound runner pairing", () => {
       }),
     ]);
 
-    expect(results.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(
+      results.filter(
+        (result) =>
+          result.status === "fulfilled" && result.value.status === "paired",
+      ),
+    ).toHaveLength(1);
+    expect(
+      results.filter(
+        (result) =>
+          result.status === "fulfilled" &&
+          result.value.status === "unavailable",
+      ),
+    ).toHaveLength(1);
     expect(
       await t.run((ctx) => ctx.db.query("registeredRunners").collect()),
     ).toHaveLength(1);
@@ -166,19 +190,20 @@ describe("owner-bound runner pairing", () => {
     await createPendingEnrollment(owner.client);
     await consumeEnrollment(t);
 
-    await expectCode(
+    await expect(
       t.mutation(recordHeartbeat, {
         agentVersion: "0.1.0",
+        clientAddressDigest: CLIENT_ADDRESS_DIGEST,
         credentialDigest: OTHER_CREDENTIAL_DIGEST,
         requestSecret: SERVER_SECRET,
         runnerId: RUNNER_ID,
       }),
-      "RUNNER_UNAVAILABLE",
-    );
+    ).resolves.toEqual({ status: "unavailable" });
 
     vi.setSystemTime(BASE_TIME + 2_000);
     await t.mutation(recordHeartbeat, {
       agentVersion: "0.1.0",
+      clientAddressDigest: CLIENT_ADDRESS_DIGEST,
       credentialDigest: CREDENTIAL_DIGEST,
       requestSecret: SERVER_SECRET,
       runnerId: RUNNER_ID,
@@ -200,14 +225,178 @@ describe("owner-bound runner pairing", () => {
     );
 
     await owner.client.mutation(revoke, { runnerId: RUNNER_ID });
-    await expectCode(
+    await expect(
       t.mutation(recordHeartbeat, {
         agentVersion: "0.1.0",
+        clientAddressDigest: CLIENT_ADDRESS_DIGEST,
         credentialDigest: CREDENTIAL_DIGEST,
         requestSecret: SERVER_SECRET,
         runnerId: RUNNER_ID,
       }),
-      "RUNNER_UNAVAILABLE",
+    ).resolves.toEqual({ status: "unavailable" });
+  });
+
+  it("persists pairing limits in Convex across repeated invalid attempts", async () => {
+    const t = convexTest(schema, modules);
+
+    for (let attempt = 0; attempt < 10; attempt += 1) {
+      await expect(consumeEnrollment(t)).resolves.toEqual({
+        status: "unavailable",
+      });
+    }
+
+    await expect(consumeEnrollment(t)).resolves.toMatchObject({
+      status: "rate_limited",
+    });
+    const buckets = await t.run((ctx) =>
+      ctx.db.query("runnerRateLimitBuckets").collect(),
     );
+    expect(buckets).toHaveLength(1);
+    expect(buckets[0]).toMatchObject({
+      count: 10,
+      deniedCount: 1,
+      failedCount: 10,
+    });
+
+    vi.setSystemTime(BASE_TIME + 60_000);
+    await expect(consumeEnrollment(t)).resolves.toEqual({
+      status: "unavailable",
+    });
+  });
+
+  it("allows exactly ten concurrent pairing attempts in one window", async () => {
+    const t = convexTest(schema, modules);
+    const results = await Promise.all(
+      Array.from({ length: 11 }, () => consumeEnrollment(t)),
+    );
+
+    expect(results.filter((result) => result.status === "unavailable")).toHaveLength(10);
+    expect(results.filter((result) => result.status === "rate_limited")).toHaveLength(1);
+  });
+
+  it("uses an IP-only heartbeat bucket before trusting a rotating runner ID", async () => {
+    const t = convexTest(schema, modules);
+
+    for (let attempt = 0; attempt < 120; attempt += 1) {
+      await expect(
+        t.mutation(recordHeartbeat, {
+          agentVersion: "0.1.0",
+          clientAddressDigest: CLIENT_ADDRESS_DIGEST,
+          credentialDigest: CREDENTIAL_DIGEST,
+          requestSecret: SERVER_SECRET,
+          runnerId: `gxr_rotating${String(attempt).padStart(4, "0")}`,
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+    }
+
+    await expect(
+      t.mutation(recordHeartbeat, {
+        agentVersion: "0.1.0",
+        clientAddressDigest: CLIENT_ADDRESS_DIGEST,
+        credentialDigest: CREDENTIAL_DIGEST,
+        requestSecret: SERVER_SECRET,
+        runnerId: "gxr_rotating9999",
+      }),
+    ).resolves.toMatchObject({ status: "rate_limited" });
+    expect(
+      await t.run((ctx) => ctx.db.query("runnerRateLimitBuckets").collect()),
+    ).toHaveLength(1);
+  });
+
+  it("hard-bounds shared rate-limit storage", async () => {
+    const t = convexTest(schema, modules);
+
+    for (let attempt = 0; attempt < 256; attempt += 1) {
+      await expect(
+        consumeEnrollment(t, {
+          clientAddressDigest: attempt.toString(16).padStart(64, "0"),
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+    }
+
+    await expect(
+      consumeEnrollment(t, { clientAddressDigest: "f".repeat(64) }),
+    ).resolves.toMatchObject({ status: "rate_limited" });
+    expect(
+      await t.run((ctx) => ctx.db.query("runnerRateLimitBuckets").collect()),
+    ).toHaveLength(256);
+    expect(
+      await t.run((ctx) => ctx.db.query("runnerRateLimitControl").unique()),
+    ).toMatchObject({ bucketCount: 256, capacityDeniedCount: 1 });
+
+    vi.setSystemTime(BASE_TIME + 60_000);
+    await expect(
+      consumeEnrollment(t, { clientAddressDigest: "e".repeat(64) }),
+    ).resolves.toEqual({ status: "unavailable" });
+    const prunedBuckets = await t.run((ctx) =>
+      ctx.db.query("runnerRateLimitBuckets").collect(),
+    );
+    expect(prunedBuckets.length).toBeLessThanOrEqual(256);
+  });
+
+  it("limits a verified runner without letting invalid credentials consume its bucket", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await addOwner(t, "owner");
+    await createPendingEnrollment(owner.client);
+    await consumeEnrollment(t);
+
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      await expect(
+        t.mutation(recordHeartbeat, {
+          agentVersion: "0.1.0",
+          clientAddressDigest: CLIENT_ADDRESS_DIGEST,
+          credentialDigest: CREDENTIAL_DIGEST,
+          requestSecret: SERVER_SECRET,
+          runnerId: RUNNER_ID,
+        }),
+      ).resolves.toMatchObject({ status: "accepted" });
+    }
+    await expect(
+      t.mutation(recordHeartbeat, {
+        agentVersion: "0.1.0",
+        clientAddressDigest: CLIENT_ADDRESS_DIGEST,
+        credentialDigest: CREDENTIAL_DIGEST,
+        requestSecret: SERVER_SECRET,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toMatchObject({ status: "rate_limited" });
+  });
+
+  it("limits distributed bad credentials separately without blocking a valid heartbeat", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await addOwner(t, "owner");
+    await createPendingEnrollment(owner.client);
+    await consumeEnrollment(t);
+
+    for (let attempt = 0; attempt < 45; attempt += 1) {
+      await expect(
+        t.mutation(recordHeartbeat, {
+          agentVersion: "0.1.0",
+          clientAddressDigest: attempt.toString(16).padStart(64, "0"),
+          credentialDigest: OTHER_CREDENTIAL_DIGEST,
+          requestSecret: SERVER_SECRET,
+          runnerId: RUNNER_ID,
+        }),
+      ).resolves.toEqual({ status: "unavailable" });
+    }
+    await expect(
+      t.mutation(recordHeartbeat, {
+        agentVersion: "0.1.0",
+        clientAddressDigest: "f".repeat(64),
+        credentialDigest: OTHER_CREDENTIAL_DIGEST,
+        requestSecret: SERVER_SECRET,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toMatchObject({ status: "rate_limited" });
+
+    await expect(
+      t.mutation(recordHeartbeat, {
+        agentVersion: "0.1.0",
+        clientAddressDigest: "a".repeat(64),
+        credentialDigest: CREDENTIAL_DIGEST,
+        requestSecret: SERVER_SECRET,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toMatchObject({ status: "accepted" });
   });
 });

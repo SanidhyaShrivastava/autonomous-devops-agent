@@ -126,6 +126,23 @@ export default defineSchema({
     .index("by_runner_id", ["runnerId"])
     .index("by_owner_paired_at", ["ownerId", "pairedAt"]),
 
+  runnerRateLimitBuckets: defineTable({
+    bucketKey: v.string(),
+    count: v.number(),
+    failedCount: v.number(),
+    deniedCount: v.number(),
+    windowStartedAt: v.number(),
+    expiresAt: v.number(),
+  })
+    .index("by_bucket_key", ["bucketKey"])
+    .index("by_expires_at", ["expiresAt"]),
+
+  runnerRateLimitControl: defineTable({
+    key: v.literal("singleton"),
+    bucketCount: v.number(),
+    capacityDeniedCount: v.optional(v.number()),
+  }).index("by_key", ["key"]),
+
   demoControl: defineTable({
     key: v.literal("singleton"),
     enabled: v.boolean(),

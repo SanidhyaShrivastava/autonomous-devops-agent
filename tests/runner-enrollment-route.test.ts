@@ -9,6 +9,7 @@ vi.mock("@/lib/server/runner-enrollment", () => ({
   pairRunner: serverMock.pairRunner,
   recordRunnerHeartbeat: serverMock.recordRunnerHeartbeat,
 }));
+vi.mock("server-only", () => ({}));
 
 import { POST as pair } from "@/app/api/runners/pair/route";
 import { POST as heartbeat } from "@/app/api/runners/heartbeat/route";
@@ -27,6 +28,8 @@ function jsonRequest(path: string, body: unknown, headers?: HeadersInit) {
 
 describe("runner enrollment routes", () => {
   beforeEach(() => {
+    vi.stubEnv("RUNNER_PAIRING_REQUEST_SECRET", "test-route-secret");
+    vi.stubEnv("VERCEL", "1");
     serverMock.pairRunner.mockReset();
     serverMock.recordRunnerHeartbeat.mockReset();
     serverMock.pairRunner.mockImplementation(
@@ -40,6 +43,7 @@ describe("runner enrollment routes", () => {
   });
 
   afterEach(() => {
+    vi.unstubAllEnvs();
     vi.restoreAllMocks();
   });
 
@@ -63,6 +67,7 @@ describe("runner enrollment routes", () => {
       string,
       unknown
     >;
+    expect(call.clientAddressDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(call.codeDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(call.credentialDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(call).not.toHaveProperty("pairingCode");
@@ -144,26 +149,71 @@ describe("runner enrollment routes", () => {
     expect(serverMock.pairRunner).not.toHaveBeenCalled();
   });
 
-  it("throttles repeated pairing guesses before they reach Convex", async () => {
-    const statuses: number[] = [];
-    for (let attempt = 0; attempt < 11; attempt += 1) {
-      const response = await pair(
-        jsonRequest(
-          "/api/runners/pair",
-          {
-            agentVersion: "0.1.0",
-            architecture: "arm64",
-            pairingCode: PAIRING_CODE,
-          },
-          { "x-forwarded-for": "203.0.113.55" },
-        ),
-      );
-      statuses.push(response.status);
-    }
+  it("uses Vercel's trusted address header instead of a caller's forwarded value", async () => {
+    const body = {
+      agentVersion: "0.1.0",
+      architecture: "arm64",
+      pairingCode: PAIRING_CODE,
+    };
+    await pair(
+      jsonRequest("/api/runners/pair", body, {
+        "x-forwarded-for": "198.51.100.10",
+        "x-vercel-forwarded-for": "203.0.113.55",
+      }),
+    );
+    await pair(
+      jsonRequest("/api/runners/pair", body, {
+        "x-forwarded-for": "198.51.100.11",
+        "x-vercel-forwarded-for": "203.0.113.55",
+      }),
+    );
 
-    expect(statuses.slice(0, 10)).toEqual(Array(10).fill(201));
-    expect(statuses[10]).toBe(429);
-    expect(serverMock.pairRunner).toHaveBeenCalledTimes(10);
+    const first = serverMock.pairRunner.mock.calls[0]?.[0];
+    const second = serverMock.pairRunner.mock.calls[1]?.[0];
+    expect(first.clientAddressDigest).toBe(second.clientAddressDigest);
+    expect(JSON.stringify(first)).not.toContain("203.0.113.55");
+    expect(JSON.stringify(first)).not.toContain("198.51.100.10");
+  });
+
+  it("does not trust forwarded address headers outside Vercel", async () => {
+    vi.stubEnv("VERCEL", "0");
+    const body = {
+      agentVersion: "0.1.0",
+      architecture: "arm64",
+      pairingCode: PAIRING_CODE,
+    };
+    await pair(
+      jsonRequest("/api/runners/pair", body, {
+        "x-forwarded-for": "198.51.100.10",
+      }),
+    );
+    await pair(
+      jsonRequest("/api/runners/pair", body, {
+        "x-forwarded-for": "198.51.100.11",
+      }),
+    );
+
+    expect(serverMock.pairRunner.mock.calls[0]?.[0].clientAddressDigest).toBe(
+      serverMock.pairRunner.mock.calls[1]?.[0].clientAddressDigest,
+    );
+  });
+
+  it("returns the shared backend rate-limit decision", async () => {
+    serverMock.pairRunner.mockResolvedValue({
+      retryAfterSeconds: 42,
+      status: "rate_limited",
+    });
+
+    const response = await pair(
+      jsonRequest("/api/runners/pair", {
+        agentVersion: "0.1.0",
+        architecture: "arm64",
+        pairingCode: PAIRING_CODE,
+      }),
+    );
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("42");
   });
 
   it("uses one generic response for an unknown, expired, or reused code", async () => {
@@ -199,6 +249,7 @@ describe("runner enrollment routes", () => {
       string,
       unknown
     >;
+    expect(call.clientAddressDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(call.credentialDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(call).not.toHaveProperty("credential");
     expect(JSON.stringify(call)).not.toContain(RUNNER_CREDENTIAL);
@@ -238,5 +289,23 @@ describe("runner enrollment routes", () => {
     expect(text).toContain("Runner authentication failed");
     expect(text).not.toContain(RUNNER_CREDENTIAL);
     expect(text).not.toMatch(/credential|runner not found/i);
+  });
+
+  it("returns the shared heartbeat rate-limit decision", async () => {
+    serverMock.recordRunnerHeartbeat.mockResolvedValue({
+      retryAfterSeconds: 17,
+      status: "rate_limited",
+    });
+
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        { agentVersion: "0.1.0", runnerId: "gxr_abcdefghijklmnopqrstuvwx" },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+
+    expect(response.status).toBe(429);
+    expect(response.headers.get("retry-after")).toBe("17");
   });
 });

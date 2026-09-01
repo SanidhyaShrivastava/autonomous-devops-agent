@@ -16,14 +16,8 @@ function requiredServerEnvironment(
   return value;
 }
 
-function convexErrorCode(error: unknown) {
-  if (!error || typeof error !== "object" || !("data" in error)) return null;
-  const data = error.data;
-  if (!data || typeof data !== "object" || !("code" in data)) return null;
-  return typeof data.code === "string" ? data.code : null;
-}
-
 export async function pairRunner(args: {
+  clientAddressDigest: string;
   codeDigest: string;
   credentialDigest: string;
   runnerId: string;
@@ -32,48 +26,49 @@ export async function pairRunner(args: {
 }): Promise<
   | { status: "paired"; runnerId: string; label: string }
   | { status: "unavailable" }
+  | { status: "rate_limited"; retryAfterSeconds: number }
 > {
-  try {
-    const result = await fetchMutation(
-      api.runners.pairRunner,
-      {
-        ...args,
-        requestSecret: requiredServerEnvironment(
-          "RUNNER_PAIRING_REQUEST_SECRET",
-        ),
-      },
-      { url: requiredServerEnvironment("CONVEX_URL") },
-    );
-    return { status: "paired", runnerId: result.runnerId, label: result.label };
-  } catch (error) {
-    if (convexErrorCode(error) === "PAIRING_UNAVAILABLE") {
-      return { status: "unavailable" };
-    }
-    throw error;
+  const result = await fetchMutation(
+    api.runners.pairRunner,
+    {
+      ...args,
+      requestSecret: requiredServerEnvironment("RUNNER_PAIRING_REQUEST_SECRET"),
+    },
+    { url: requiredServerEnvironment("CONVEX_URL") },
+  );
+  if (result.status === "rate_limited") {
+    return {
+      status: "rate_limited",
+      retryAfterSeconds: result.retryAfterSeconds,
+    };
   }
+  if (result.status === "unavailable") return result;
+  return { status: "paired", runnerId: result.runnerId, label: result.label };
 }
 
 export async function recordRunnerHeartbeat(args: {
+  clientAddressDigest: string;
   runnerId: string;
   credentialDigest: string;
   agentVersion: string;
-}): Promise<{ status: "accepted" } | { status: "unavailable" }> {
-  try {
-    await fetchMutation(
-      api.runners.recordHeartbeat,
-      {
-        ...args,
-        requestSecret: requiredServerEnvironment(
-          "RUNNER_PAIRING_REQUEST_SECRET",
-        ),
-      },
-      { url: requiredServerEnvironment("CONVEX_URL") },
-    );
-    return { status: "accepted" };
-  } catch (error) {
-    if (convexErrorCode(error) === "RUNNER_UNAVAILABLE") {
-      return { status: "unavailable" };
-    }
-    throw error;
+}): Promise<
+  | { status: "accepted" }
+  | { status: "unavailable" }
+  | { status: "rate_limited"; retryAfterSeconds: number }
+> {
+  const result = await fetchMutation(
+    api.runners.recordHeartbeat,
+    {
+      ...args,
+      requestSecret: requiredServerEnvironment("RUNNER_PAIRING_REQUEST_SECRET"),
+    },
+    { url: requiredServerEnvironment("CONVEX_URL") },
+  );
+  if (result.status === "rate_limited") {
+    return {
+      status: "rate_limited",
+      retryAfterSeconds: result.retryAfterSeconds,
+    };
   }
+  return { status: result.status };
 }

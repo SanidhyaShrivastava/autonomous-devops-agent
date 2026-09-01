@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 
 import { recordRunnerHeartbeat } from "@/lib/server/runner-enrollment";
 import { isJsonContentType, readLimitedBody } from "@/lib/server/http-body";
-import { checkRequestRateLimit } from "@/lib/server/request-rate-limit";
+import { runnerClientAddressDigest } from "@/lib/server/runner-client-address";
 import { z } from "zod";
 
 export const runtime = "nodejs";
@@ -67,26 +67,20 @@ export async function POST(request: Request) {
       return json({ error: "Request body is invalid" }, 400);
     }
 
-    const rateLimit = checkRequestRateLimit({
-      request,
-      scope: "heartbeat",
-      identity: parsed.data.runnerId,
-      limit: 45,
-    });
-    if (!rateLimit.allowed) {
-      return json(
-        { error: "Too many heartbeat requests" },
-        429,
-        { "Retry-After": String(rateLimit.retryAfterSeconds) },
-      );
-    }
-
     const result = await recordRunnerHeartbeat({
       ...parsed.data,
+      clientAddressDigest: runnerClientAddressDigest(request),
       credentialDigest: sha256(credential),
     });
     if (result.status === "unavailable") {
       return json({ error: "Runner authentication failed" }, 401);
+    }
+    if (result.status === "rate_limited") {
+      return json(
+        { error: "Too many heartbeat requests" },
+        429,
+        { "Retry-After": String(result.retryAfterSeconds) },
+      );
     }
 
     return new Response(null, { status: 204, headers: noStoreHeaders() });
