@@ -12,6 +12,8 @@
     "test:runner": "vitest run tests/sanitize.test.ts tests/docker-adapter.test.ts",
     "runner": "tsx runner/index.ts",
     "runner:start": "tsx runner/index.ts",
+    "host:pair": "tsx host-agent/pair.ts",
+    "host:connect": "tsx host-agent/connect.ts",
     "demo:build": "docker buildx build --pull --load --tag gx-autodevops-linux-sandbox:m2 --file linux-sandbox/Dockerfile linux-sandbox",
     "demo:start": "tsx scripts/linux-sandbox-start.ts",
     "demo:preflight": "tsx scripts/demo-service-preflight.ts",
