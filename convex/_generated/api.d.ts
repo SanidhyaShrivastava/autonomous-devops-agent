@@ -8,7 +8,11 @@
  * @module
  */
 
+import type * as auth from "../auth.js";
+import type * as crons from "../crons.js";
 import type * as demo from "../demo.js";
+import type * as http from "../http.js";
+import type * as lib_auth from "../lib/auth.js";
 import type * as lib_guards from "../lib/guards.js";
 import type * as runner from "../runner.js";
 import type * as setupChecks from "../setupChecks.js";
@@ -20,7 +24,11 @@ import type {
 } from "convex/server";
 
 declare const fullApi: ApiFromModules<{
+  auth: typeof auth;
+  crons: typeof crons;
   demo: typeof demo;
+  http: typeof http;
+  "lib/auth": typeof lib_auth;
   "lib/guards": typeof lib_guards;
   runner: typeof runner;
   setupChecks: typeof setupChecks;

@@ -25,6 +25,8 @@
     "eval": "tsx scripts/run-evals.ts"
   },
   "dependencies": {
+    "@auth/core": "0.41.3",
+    "@convex-dev/auth": "0.0.95",
     "convex": "^1.45.0",
     "dotenv": "^17.4.2",
     "next": "16.3.3",
