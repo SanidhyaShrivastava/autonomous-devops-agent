@@ -12,10 +12,10 @@ import {
 } from "../runner/config";
 import { LinuxSandboxAdapter } from "../runner/linux-sandbox-adapter";
 import { deriveSandboxAgentToken } from "../runner/sandbox-token";
+import { PUBLIC_APP_HEADLINE } from "../src/lib/public-copy";
 
 const NETWORK_TIMEOUT_MS = 10_000;
-const PUBLIC_APP_MARKER =
-  "Recover one failed Linux service safely in about 20 seconds.";
+const PUBLIC_APP_MARKER = PUBLIC_APP_HEADLINE;
 
 function requiredEnvironment(
   name: "CONVEX_URL" | "PUBLIC_APP_URL" | "RUNNER_TOKEN",

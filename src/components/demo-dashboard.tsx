@@ -7,6 +7,7 @@ import { useEffect, useState, useTransition } from "react";
 
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import { PUBLIC_APP_HEADLINE } from "@/lib/public-copy";
 import {
   ApprovalGate,
   type ApprovalDecisionNotice,
@@ -660,10 +661,7 @@ export function DemoDashboard() {
             <p className="section-kicker">
               One service · two controlled recovery modes
             </p>
-            <h1>
-              Recover one failed Linux service automatically—or pause before
-              the restart.
-            </h1>
+            <h1>{PUBLIC_APP_HEADLINE}</h1>
             <p className="headline-summary">
               Choose the existing autonomous path or wait for the agent to pass
               an allowlist policy check before asking this browser to decide.
