@@ -3,8 +3,8 @@
 A GrowthX Build Week project proving a bounded operational recovery loop: detect a failed Linux workload, investigate it, execute one permitted recovery action, and independently verify health.
 
 - Public app: https://autonomous-devops-agent.vercel.app
-- Status: the complete M1 recovery loop is live, and a signed-in owner can now pair one separate Linux runner for heartbeat-only connectivity. The paired runner has no service, log, file, shell, or recovery authority yet.
-- Surface: Sanidhya-owned disposable Linux sandbox in Docker only. Current evidence is controlled/staged and cannot support an L4 or L5 real-output claim.
+- Status: the complete M1 recovery loop is live, and a signed-in owner can pair one disposable Linux runner, register the bundled fixed service, prepare one approval-required restart, approve or reject it, and see fresh post-restart verification.
+- Surface: Sanidhya-owned disposable Linux containers in Docker only. The private path is fixed policy recovery, not arbitrary service onboarding or AI investigation. Current evidence is controlled/staged and cannot support an L4 or L5 real-output claim.
 
 ## Hybrid autonomy proof
 
@@ -57,20 +57,26 @@ On Tue 1 Sep 2026, the production coordinator was cut over to the isolated Linux
 - Any future real-user environment remains approval-first until action-level trust is validated.
 - The staged public demo offers both an automatic policy-checked path and a browser approval path for the same fixed action; neither path grants arbitrary authority.
 
-## Owner-bound Linux runner onboarding
+## Owner-bound Linux runner recovery
 
-The private preview at `/servers/new` now proves the first real-user connection step:
+The private preview at `/servers/new` now proves one narrow connection-and-recovery path:
 
 1. Create an operator account or sign in.
 2. Enter a private runner label and confirm permission to connect the server.
 3. Create a one-time pairing code; only its digest is stored in Convex and the code expires after 10 minutes.
 4. On the non-sensitive Linux host, clone this repository, run `npm install`, then run `npm run host:pair` and paste the code.
 5. Run `npm run host:connect`; the browser shows the runner online after its outbound two-second heartbeat arrives.
-6. Revoke access from the browser when needed; the saved runner credential is then rejected.
+6. Click **Register disposable service**. This grants exactly one fixed loopback HTTP health check and one fixed restart; there are no editable URLs, paths, or commands.
+7. For the controlled test only, run `npm run host:seed-failure` on that Linux host. A natural service failure would enter the same unhealthy state.
+8. Click **Prepare approval-first recovery**, then approve or reject the named fixed restart.
+9. On approval, the runner durably claims the one-time command, starts a fresh service process without a shell, and reports success only after an exact HTTP 200 from a changed service instance. Rejection executes nothing.
+10. Revoke access from the browser when needed; the saved runner credential is then rejected.
 
-This onboarding release is deliberately heartbeat-only. The agent does not discover services, accept commands, read logs or files, or execute recovery actions. Pairing and heartbeat requests use shared, bounded Convex rate limits rather than temporary per-web-process counters. The Build Week password login has no reset-email flow yet, so it must not reuse an important password.
+The host agent has no inbound listener and accepts no caller-supplied shell, service name, path, URL, or parameters. Its saved credential and execution journal use owner-only file permissions. A claimed command is never replayed after an unknown result. Pairing, heartbeat, and recovery requests use shared bounded limits rather than temporary per-web-process counters. The Build Week password login has no reset-email flow yet, so it must not reuse an important password.
 
-Live verification used one disposable Debian Linux container and one clearly named test-only account. Pairing, heartbeat state after reload, phone layout at 390 pixels, credential revocation, fresh-pairing availability, and sign-out all passed. That test account and its revoked runner are test evidence and must not be counted as a user or signup.
+Live verification used one disposable Debian Linux container and one clearly named test-only account. A fresh unhealthy report exposed the approval-first action; rejection left the service unreachable and recorded **Recovery rejected**; two separate approvals produced new service instance IDs and fresh HTTP 200 evidence; the verified record survived reload. The deployed page passed at 1440 pixels and 390 pixels with no horizontal overflow or browser errors. The unchanged public autonomous demo also completed all nine steps healthy in `12.9s` after the release. The full suite passes 557/557 tests. This account and every controlled run are test evidence and must not be counted as users, signups, or genuine production-surface output.
+
+This remains deliberately narrow. The private path cannot discover or configure an existing user service, read its logs, run an AI investigation, manage systemd, or execute arbitrary recovery commands. Connecting a consenting user's genuine non-sensitive workload is the next proof required before any L4 real-output claim.
 
 ## Local verification
 
