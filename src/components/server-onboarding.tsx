@@ -14,6 +14,51 @@ import {
 import { api } from "../../convex/_generated/api";
 
 const RUNNER_FRESHNESS_MS = 6_000;
+const HEALTH_FRESHNESS_MS = 8_000;
+const FIXED_CAPABILITY_ID = "fixed_disposable_service_v1";
+
+const RECOVERY_STATE_COPY = {
+  approved: {
+    heading: "Restart approved",
+    message:
+      "The one-time fixed restart is authorized. The runner has not claimed it yet.",
+    tone: "warning",
+  },
+  claimed: {
+    heading: "Restart in progress",
+    message:
+      "The runner claimed this request. A second restart cannot be issued while it runs.",
+    tone: "warning",
+  },
+  failed: {
+    heading: "Recovery failed",
+    message:
+      "The fixed restart did not produce a verified healthy service. It will not retry automatically.",
+    tone: "danger",
+  },
+  rejected: {
+    heading: "Recovery rejected",
+    message: "No restart was authorized or sent to the Linux runner.",
+    tone: "neutral",
+  },
+  expired: {
+    heading: "Approval expired",
+    message: "The approval window closed. No restart was authorized.",
+    tone: "neutral",
+  },
+  not_needed: {
+    heading: "Recovery not needed",
+    message:
+      "A fresh health check showed that the service was already healthy, so no restart ran.",
+    tone: "success",
+  },
+  execution_unknown: {
+    heading: "Recovery result unknown",
+    message:
+      "The runner stopped reporting after it claimed the restart. The command will not be replayed.",
+    tone: "danger",
+  },
+} as const;
 
 function base64Url(bytes: Uint8Array) {
   const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
@@ -49,6 +94,9 @@ export function ServerOnboarding() {
   );
   const createEnrollment = useMutation(api.runners.createEnrollment);
   const revokeRunner = useMutation(api.runners.revoke);
+  const registerFixedWorkload = useMutation(api.runners.registerFixedWorkload);
+  const requestFixedRecovery = useMutation(api.runners.requestFixedRecovery);
+  const decideFixedRecovery = useMutation(api.runners.decideFixedRecovery);
   const { signOut } = useAuthActions();
   const router = useRouter();
   const [issuedCode, setIssuedCode] = useState<string | null>(null);
@@ -57,9 +105,14 @@ export function ServerOnboarding() {
   const [isCreating, setIsCreating] = useState(false);
   const [isRevoking, setIsRevoking] = useState(false);
   const [showReplacementForm, setShowReplacementForm] = useState(false);
+  const [pendingOperation, setPendingOperation] = useState<
+    "register" | "prepare" | "approve" | "reject" | null
+  >(null);
   const [notice, setNotice] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   const stateHeadingRef = useRef<HTMLHeadingElement>(null);
+  const operationHeadingRef = useRef<HTMLHeadingElement>(null);
+  const operationInFlightRef = useRef(false);
   const signOutStartedRef = useRef(false);
 
   const runner = state?.runner ?? null;
@@ -67,6 +120,44 @@ export function ServerOnboarding() {
   const runnerOnline = Boolean(
     activeRunner?.lastHeartbeatAt &&
       clock - activeRunner.lastHeartbeatAt < RUNNER_FRESHNESS_MS,
+  );
+  const capabilityFresh = Boolean(
+    runnerOnline &&
+      activeRunner?.capabilityId === FIXED_CAPABILITY_ID &&
+      activeRunner.capabilityReportedAt &&
+      clock - activeRunner.capabilityReportedAt < RUNNER_FRESHNESS_MS,
+  );
+  const workload = state?.workload ?? null;
+  const latestRecovery = state?.latestRecovery ?? null;
+  const healthFresh = Boolean(
+    workload?.healthReportedAt &&
+      clock - workload.healthReportedAt < HEALTH_FRESHNESS_MS,
+  );
+  const recoveryVerified = Boolean(
+    latestRecovery?.status === "succeeded" &&
+      latestRecovery.executionResultCode === "restart_succeeded" &&
+      latestRecovery.verificationStatus === "healthy" &&
+      latestRecovery.verificationDetailCode === "exact_http_200" &&
+      latestRecovery.postActionInstanceId &&
+      latestRecovery.postActionInstanceId !==
+        latestRecovery.preActionInstanceId &&
+      healthFresh &&
+      workload?.healthStatus === "healthy" &&
+      workload.currentInstanceId === latestRecovery.postActionInstanceId,
+  );
+  const recoveryFocusKey = workload
+    ? `${workload.workloadId}:${workload.healthStatus}:${latestRecovery?.status ?? "none"}`
+    : null;
+  const approvalWindowOpen = Boolean(
+    latestRecovery?.status === "pending_approval" &&
+      latestRecovery.deadlineAt > clock,
+  );
+  const canApproveFixedRecovery = Boolean(
+    approvalWindowOpen &&
+      runnerOnline &&
+      capabilityFresh &&
+      healthFresh &&
+      workload?.healthStatus === "unhealthy",
   );
   const waitingEnrollment =
     state?.enrollment?.state === "waiting" ? state.enrollment : null;
@@ -85,6 +176,11 @@ export function ServerOnboarding() {
       stateHeadingRef.current?.focus();
     }
   }, [activeRunner, issuedCode, showReplacementForm]);
+
+  useEffect(() => {
+    if (!recoveryFocusKey) return;
+    operationHeadingRef.current?.focus();
+  }, [recoveryFocusKey]);
 
   useEffect(() => {
     if (!isSigningOut || signOutStartedRef.current) return;
@@ -149,6 +245,80 @@ export function ServerOnboarding() {
     }
   }
 
+  async function runOwnerOperation(
+    operation: "register" | "prepare" | "approve" | "reject",
+    request: () => Promise<unknown>,
+    successMessage: string,
+    failureMessage: string,
+  ) {
+    if (operationInFlightRef.current) return;
+    operationInFlightRef.current = true;
+    setPendingOperation(operation);
+    setNotice(null);
+    try {
+      await request();
+      setNotice(successMessage);
+    } catch {
+      setNotice(failureMessage);
+    } finally {
+      operationInFlightRef.current = false;
+      setPendingOperation(null);
+      operationHeadingRef.current?.focus();
+    }
+  }
+
+  function handleRegisterWorkload() {
+    if (!activeRunner || !capabilityFresh || workload) return;
+    void runOwnerOperation(
+      "register",
+      () => registerFixedWorkload({}),
+      "Disposable service registered. Waiting for its first fresh health check.",
+      "The service could not be registered. Keep the runner online and try again.",
+    );
+  }
+
+  function handlePrepareRecovery() {
+    if (
+      !activeRunner ||
+      !capabilityFresh ||
+      !runnerOnline ||
+      !workload ||
+      !healthFresh ||
+      workload.healthStatus !== "unhealthy" ||
+      latestRecovery?.status === "pending_approval" ||
+      latestRecovery?.status === "approved" ||
+      latestRecovery?.status === "claimed"
+    ) {
+      return;
+    }
+    void runOwnerOperation(
+      "prepare",
+      () => requestFixedRecovery({}),
+      "Approval-first recovery prepared. Review the fixed action before approving it.",
+      "Recovery could not be prepared. The runner and unhealthy report must both be fresh.",
+    );
+  }
+
+  function handleRecoveryDecision(decision: "approved" | "rejected") {
+    if (!latestRecovery || latestRecovery.status !== "pending_approval") return;
+    const approving = decision === "approved";
+    if (!approvalWindowOpen || (approving && !canApproveFixedRecovery)) return;
+    void runOwnerOperation(
+      approving ? "approve" : "reject",
+      () =>
+        decideFixedRecovery({
+          commandId: latestRecovery.commandId,
+          decision,
+        }),
+      approving
+        ? "Fixed restart approved. Waiting for the runner to claim it."
+        : "Recovery rejected. No restart was authorized.",
+      approving
+        ? "Approval failed. No restart was authorized."
+        : "Rejection could not be recorded. Try again.",
+    );
+  }
+
   function handleSignOut() {
     setIsSigningOut(true);
   }
@@ -176,28 +346,99 @@ export function ServerOnboarding() {
         <p className="section-kicker">Server onboarding · private preview</p>
         <h1 id="onboarding-title">Connect one Linux runner</h1>
         <p>
-          Give the control plane a heartbeat from one non-sensitive Linux server.
-          This proves ownership and reachability before any service access is added.
+          {workload
+            ? "Fixed policy recovery is active for one disposable service: one health check, one approval-required restart, and fresh verification."
+            : "Give the control plane a heartbeat from one non-sensitive Linux server. This proves ownership and reachability before any service access is added."}
         </p>
       </section>
 
-      <ol className="connection-rail" aria-label="Connection path">
-        <li className="connection-node connection-node-active">
+      <ol className="connection-rail" aria-label="Recovery authority path">
+        <li
+          className={`connection-node ${
+            runnerOnline ? "connection-node-online" : "connection-node-current"
+          }`}
+        >
           <span>01</span>
-          <strong>Browser</strong>
-          <small>Signed-in owner</small>
+          <strong>Runner</strong>
+          <small>{runnerOnline ? "Online" : "Connect first"}</small>
         </li>
         <li className="connection-line" aria-hidden="true">→</li>
-        <li className="connection-node connection-node-active">
+        <li
+          className={`connection-node ${
+            workload && healthFresh
+              ? workload.healthStatus === "healthy"
+                ? "connection-node-online"
+                : "connection-node-danger"
+              : activeRunner
+                ? "connection-node-current"
+                : ""
+          }`}
+        >
           <span>02</span>
-          <strong>Control plane</strong>
-          <small>One-time pairing</small>
+          <strong>Health check</strong>
+          <small>
+            {workload && healthFresh
+              ? workload.healthStatus === "healthy"
+                ? "Fresh HTTP 200"
+                : "Unhealthy"
+              : workload
+                ? "Waiting for fresh report"
+                : "Not registered"}
+          </small>
         </li>
         <li className="connection-line" aria-hidden="true">→</li>
-        <li className={`connection-node ${runnerOnline ? "connection-node-online" : ""}`}>
+        <li
+          className={`connection-node ${
+            latestRecovery?.status === "pending_approval"
+              ? "connection-node-current connection-node-warning"
+              : latestRecovery?.status === "approved" ||
+                  latestRecovery?.status === "claimed" ||
+                  recoveryVerified
+                ? "connection-node-online"
+                : ""
+          }`}
+        >
           <span>03</span>
-          <strong>Linux runner</strong>
-          <small>{runnerOnline ? "Heartbeat online" : "Awaiting heartbeat"}</small>
+          <strong>Approval</strong>
+          <small>
+            {latestRecovery?.status === "pending_approval"
+              ? "Owner decision needed"
+              : latestRecovery?.approvedAt
+                ? "Approved"
+                : "Always required"}
+          </small>
+        </li>
+        <li className="connection-line" aria-hidden="true">→</li>
+        <li
+          className={`connection-node ${
+            latestRecovery?.status === "approved"
+              ? "connection-node-current connection-node-warning"
+              : latestRecovery?.status === "claimed"
+                ? "connection-node-current"
+                : recoveryVerified
+                  ? "connection-node-online"
+                  : ""
+          }`}
+        >
+          <span>04</span>
+          <strong>Restart</strong>
+          <small>
+            {latestRecovery?.status === "claimed"
+              ? "Executing"
+              : recoveryVerified
+                ? "Completed"
+                : "Fixed action only"}
+          </small>
+        </li>
+        <li className="connection-line" aria-hidden="true">→</li>
+        <li
+          className={`connection-node ${
+            recoveryVerified ? "connection-node-online" : ""
+          }`}
+        >
+          <span>05</span>
+          <strong>Verified</strong>
+          <small>{recoveryVerified ? "Fresh instance healthy" : "Not reached"}</small>
         </li>
       </ol>
 
@@ -218,24 +459,308 @@ export function ServerOnboarding() {
                 <span className="status-dot" aria-hidden="true" />
                 {runnerOnline ? "Online" : "Heartbeat offline"}
               </span>
-              <dl className="runner-facts">
-                <div><dt>Private label</dt><dd>{activeRunner.label}</dd></div>
-                <div><dt>Runner ID</dt><dd><code>{activeRunner.runnerId}</code></dd></div>
-                <div><dt>Platform</dt><dd>Linux · {activeRunner.architecture}</dd></div>
-                <div><dt>Agent</dt><dd>{activeRunner.agentVersion}</dd></div>
-              </dl>
-              <p className="onboarding-boundary-copy">
-                No logs, services, or commands are available to the control plane.
-                This runner sends heartbeat status only.
+              <p className="runner-summary">
+                <strong>{activeRunner.label}</strong>
+                <span>Linux · {activeRunner.architecture} · agent {activeRunner.agentVersion}</span>
               </p>
-              <button
-                className="danger-outline-action"
-                disabled={isRevoking}
-                onClick={handleRevoke}
-                type="button"
-              >
-                {isRevoking ? "Revoking…" : "Revoke runner access"}
-              </button>
+
+              <section className="recovery-control" aria-labelledby="recovery-state-title">
+                {!workload ? (
+                  capabilityFresh ? (
+                    <div className="recovery-next-action">
+                      <p className="section-kicker">Next safe grant</p>
+                      <h3
+                        id="recovery-state-title"
+                        ref={operationHeadingRef}
+                        tabIndex={-1}
+                      >
+                        Register one fixed service
+                      </h3>
+                      <p>
+                        This enables one fixed HTTP health check and one fixed restart.
+                        There are no editable paths, URLs, or commands.
+                      </p>
+                      <button
+                        className="primary-action recovery-primary-action"
+                        disabled={pendingOperation !== null}
+                        onClick={handleRegisterWorkload}
+                        type="button"
+                      >
+                        {pendingOperation === "register"
+                          ? "Registering service…"
+                          : "Register disposable service"}
+                      </button>
+                    </div>
+                  ) : (
+                    <div className="recovery-outcome recovery-outcome-neutral">
+                      <p className="section-kicker">No service authority yet</p>
+                      <h3
+                        id="recovery-state-title"
+                        ref={operationHeadingRef}
+                        tabIndex={-1}
+                      >
+                        Waiting for safe runner capability
+                      </h3>
+                      <p>
+                        Waiting for the fixed service capability from a fresh runner
+                        heartbeat. No recovery actions are enabled.
+                      </p>
+                    </div>
+                  )
+                ) : (
+                  <>
+                    <dl className="fixed-policy-facts" aria-label="Fixed recovery policy">
+                      <div><dt>Service</dt><dd>Connected demo service</dd></div>
+                      <div><dt>Health check</dt><dd>Fixed HTTP 200 health check</dd></div>
+                      <div><dt>Recovery action</dt><dd>Fixed service restart</dd></div>
+                      <div><dt>Decision rule</dt><dd>Human approval required</dd></div>
+                    </dl>
+
+                    {latestRecovery?.status === "pending_approval" ? (
+                      <div className="recovery-outcome recovery-outcome-warning">
+                        <p className="section-kicker">Owner decision</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          Approval required
+                        </h3>
+                        <p>
+                          The fixed restart is prepared. Nothing runs until you choose.
+                        </p>
+                        {!canApproveFixedRecovery ? (
+                          <p className="approval-blocked-copy">
+                            Approval is blocked until the runner, capability, and
+                            unhealthy health report are fresh. You can still reject it.
+                          </p>
+                        ) : null}
+                        <div className="recovery-decision-actions">
+                          <button
+                            className="approval-owner-action"
+                            disabled={
+                              pendingOperation !== null || !canApproveFixedRecovery
+                            }
+                            onClick={() => handleRecoveryDecision("approved")}
+                            type="button"
+                          >
+                            {pendingOperation === "approve"
+                              ? "Approving…"
+                              : "Approve fixed restart"}
+                          </button>
+                          <button
+                            className="rejection-owner-action"
+                            disabled={pendingOperation !== null || !approvalWindowOpen}
+                            onClick={() => handleRecoveryDecision("rejected")}
+                            type="button"
+                          >
+                            {pendingOperation === "reject" ? "Rejecting…" : "Reject"}
+                          </button>
+                        </div>
+                      </div>
+                    ) : latestRecovery?.status === "approved" ||
+                      latestRecovery?.status === "claimed" ? (
+                      <div
+                        className={`recovery-outcome recovery-outcome-${
+                          RECOVERY_STATE_COPY[
+                            latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
+                          ].tone
+                        }`}
+                      >
+                        <p className="section-kicker">Latest recovery</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          {
+                            RECOVERY_STATE_COPY[
+                              latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
+                            ].heading
+                          }
+                        </h3>
+                        <p>
+                          {
+                            RECOVERY_STATE_COPY[
+                              latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
+                            ].message
+                          }
+                        </p>
+                      </div>
+                    ) : !runnerOnline ? (
+                      <div className="recovery-outcome recovery-outcome-danger">
+                        <p className="section-kicker">Connection required</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          Runner offline
+                        </h3>
+                        <p>Recovery is blocked until this runner sends a fresh heartbeat.</p>
+                      </div>
+                    ) : !capabilityFresh ? (
+                      <div className="recovery-outcome recovery-outcome-neutral">
+                        <p className="section-kicker">Capability required</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          Waiting for safe runner capability
+                        </h3>
+                        <p>
+                          The runner is online, but its fixed recovery capability is not fresh.
+                        </p>
+                      </div>
+                    ) : !healthFresh || workload.healthStatus === "unknown" ? (
+                      <div className="recovery-outcome recovery-outcome-neutral">
+                        <p className="section-kicker">Health required</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          Waiting for fresh health
+                        </h3>
+                        <p>
+                          No recovery can be prepared until the fixed health check reports again.
+                        </p>
+                      </div>
+                    ) : workload.healthStatus === "unhealthy" ? (
+                      <div className="recovery-outcome recovery-outcome-danger">
+                        <p className="section-kicker">Current outcome</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          Service unhealthy
+                        </h3>
+                        <p>
+                          The fresh fixed health check failed. Prepare the one allowlisted
+                          restart for an explicit owner decision.
+                        </p>
+                        <button
+                          className="primary-action recovery-primary-action"
+                          disabled={pendingOperation !== null}
+                          onClick={handlePrepareRecovery}
+                          type="button"
+                        >
+                          {pendingOperation === "prepare"
+                            ? "Preparing recovery…"
+                            : "Prepare approval-first recovery"}
+                        </button>
+                      </div>
+                    ) : latestRecovery?.status === "succeeded" ? (
+                      recoveryVerified ? (
+                        <div className="recovery-outcome recovery-outcome-success">
+                          <p className="section-kicker">Verified outcome</p>
+                          <h3
+                            id="recovery-state-title"
+                            ref={operationHeadingRef}
+                            tabIndex={-1}
+                          >
+                            Recovery verified
+                          </h3>
+                          <p>
+                            A fresh HTTP 200 health check passed after the service
+                            instance changed. The restart is complete.
+                          </p>
+                          <strong className="verified-instance">
+                            {latestRecovery.postActionInstanceId}
+                          </strong>
+                        </div>
+                      ) : (
+                        <div className="recovery-outcome recovery-outcome-danger">
+                          <p className="section-kicker">Verification blocked</p>
+                          <h3
+                            id="recovery-state-title"
+                            ref={operationHeadingRef}
+                            tabIndex={-1}
+                          >
+                            Verification evidence incomplete
+                          </h3>
+                          <p>
+                            A command result arrived, but it did not prove both a fresh
+                            HTTP 200 and a changed service instance.
+                          </p>
+                        </div>
+                      )
+                    ) : latestRecovery && latestRecovery.status in RECOVERY_STATE_COPY ? (
+                      <div
+                        className={`recovery-outcome recovery-outcome-${
+                          RECOVERY_STATE_COPY[
+                            latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
+                          ].tone
+                        }`}
+                      >
+                        <p className="section-kicker">Latest recovery</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          {
+                            RECOVERY_STATE_COPY[
+                              latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
+                            ].heading
+                          }
+                        </h3>
+                        <p>
+                          {
+                            RECOVERY_STATE_COPY[
+                              latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
+                            ].message
+                          }
+                        </p>
+                      </div>
+                    ) : (
+                      <div className="recovery-outcome recovery-outcome-success">
+                        <p className="section-kicker">Current outcome</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          Healthy — no recovery needed
+                        </h3>
+                        <p>
+                          The fixed health check returned a fresh HTTP 200. No restart is permitted.
+                        </p>
+                      </div>
+                    )}
+
+                    <details className="technical-identifiers">
+                      <summary>Technical identifiers</summary>
+                      <dl>
+                        <div><dt>Runner ID</dt><dd><code>{activeRunner.runnerId}</code></dd></div>
+                        <div><dt>Workload ID</dt><dd><code>{workload.workloadId}</code></dd></div>
+                        <div><dt>Health check ID</dt><dd><code>{workload.healthCheckId}</code></dd></div>
+                        <div><dt>Action ID</dt><dd><code>{workload.recoveryActionId}</code></dd></div>
+                        {latestRecovery ? (
+                          <div><dt>Recovery ID</dt><dd><code>{latestRecovery.commandId}</code></dd></div>
+                        ) : null}
+                      </dl>
+                    </details>
+                  </>
+                )}
+              </section>
+
+              <div className="runner-access-control">
+                <div>
+                  <strong>Runner access</strong>
+                  <p>Revocation is separate from any recovery decision.</p>
+                </div>
+                <button
+                  className="danger-outline-action"
+                  disabled={isRevoking || pendingOperation !== null}
+                  onClick={handleRevoke}
+                  type="button"
+                >
+                  {isRevoking ? "Revoking…" : "Revoke runner access"}
+                </button>
+              </div>
             </div>
           ) : waitingEnrollment && !issuedCode && !showReplacementForm ? (
             <div className="onboarding-state">
@@ -331,14 +856,26 @@ export function ServerOnboarding() {
           <h2 id="policy-title">Access before authority</h2>
           <dl>
             <div><dt>Environment</dt><dd>One non-sensitive Linux server</dd></div>
-            <div><dt>Connection</dt><dd>Outbound HTTPS heartbeat only</dd></div>
-            <div><dt>Recovery policy</dt><dd>Not configured</dd></div>
-            <div><dt>Enabled actions</dt><dd className="policy-warning">No recovery actions enabled</dd></div>
-            <div><dt>Host access</dt><dd>No shell, logs, files, or discovery</dd></div>
+            <div>
+              <dt>Connection</dt>
+              <dd>{workload ? "Outbound HTTPS runner channel" : "Outbound HTTPS heartbeat only"}</dd>
+            </div>
+            <div><dt>Recovery policy</dt><dd>{workload ? "Approval-first" : "Not configured"}</dd></div>
+            <div>
+              <dt>Enabled actions</dt>
+              <dd className={workload ? "policy-ready" : "policy-warning"}>
+                {workload ? "One allowlisted restart" : "No recovery actions enabled"}
+              </dd>
+            </div>
+            <div>
+              <dt>Host access</dt>
+              <dd>{workload ? "One health probe + one restart; no shell input" : "No shell, logs, files, or discovery"}</dd>
+            </div>
           </dl>
           <p>
-            The next build will register one explicit service and one safe action.
-            Pairing this runner does not grant that authority.
+            {workload
+              ? "This is fixed policy recovery, not AI investigation. The private path cannot discover services or accept generated commands."
+              : "Registration grants one explicit service and one safe action. Pairing alone does not grant that authority."}
           </p>
         </aside>
       </div>
