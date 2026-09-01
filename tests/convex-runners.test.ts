@@ -22,7 +22,23 @@ const recordHeartbeat = makeFunctionReference<"mutation">(
   "runners:recordHeartbeat",
 );
 const revoke = makeFunctionReference<"mutation">("runners:revoke");
+const registerFixedWorkload = makeFunctionReference<"mutation">(
+  "runners:registerFixedWorkload",
+);
+const requestFixedRecovery = makeFunctionReference<"mutation">(
+  "runners:requestFixedRecovery",
+);
+const decideFixedRecovery = makeFunctionReference<"mutation">(
+  "runners:decideFixedRecovery",
+);
+const watchFixedRecoveryCommands = makeFunctionReference<"mutation">(
+  "runners:watchFixedRecoveryCommands",
+);
 const CLIENT_ADDRESS_DIGEST = "e".repeat(64);
+const CONNECTED_CAPABILITY_ID = "fixed_disposable_service_v1";
+const CONNECTED_WORKLOAD_ID = "connected-demo-service";
+const CONNECTED_HEALTH_CHECK_ID = "check-connected-demo-service-health";
+const CONNECTED_RECOVERY_ACTION_ID = "restart-connected-demo-service";
 
 type Harness = TestConvex<typeof schema>;
 
@@ -62,6 +78,59 @@ async function consumeEnrollment(
   });
 }
 
+async function createConnectedRunner(t: Harness, ownerSuffix = "connected-owner") {
+  const owner = await addOwner(t, ownerSuffix);
+  await createPendingEnrollment(owner.client);
+  await consumeEnrollment(t);
+  return owner;
+}
+
+async function connectedHeartbeat(
+  t: Harness,
+  overrides: Record<string, unknown> = {},
+) {
+  return await t.mutation(recordHeartbeat, {
+    agentVersion: "0.2.0",
+    capabilityId: CONNECTED_CAPABILITY_ID,
+    clientAddressDigest: CLIENT_ADDRESS_DIGEST,
+    credentialDigest: CREDENTIAL_DIGEST,
+    requestSecret: SERVER_SECRET,
+    runnerId: RUNNER_ID,
+    ...overrides,
+  });
+}
+
+function fixedHealth(
+  healthStatus: "healthy" | "unhealthy",
+  instanceId = "instance-initial",
+) {
+  return {
+    workloadId: CONNECTED_WORKLOAD_ID,
+    healthCheckId: CONNECTED_HEALTH_CHECK_ID,
+    healthStatus,
+    detailCode:
+      healthStatus === "healthy" ? "exact_http_200" : "connection_failed",
+    ...(healthStatus === "healthy" ? { instanceId } : {}),
+  };
+}
+
+async function registerConnectedWorkload(t: Harness, ownerSuffix?: string) {
+  const owner = await createConnectedRunner(t, ownerSuffix);
+  await connectedHeartbeat(t);
+  await owner.client.mutation(registerFixedWorkload, {});
+  return owner;
+}
+
+async function createPendingRecovery(t: Harness, ownerSuffix?: string) {
+  const owner = await registerConnectedWorkload(t, ownerSuffix);
+  await connectedHeartbeat(t, {
+    healthReport: fixedHealth("healthy", "instance-before-recovery"),
+  });
+  await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+  const request = await owner.client.mutation(requestFixedRecovery, {});
+  return { owner, request };
+}
+
 describe("owner-bound runner pairing", () => {
   beforeEach(() => {
     vi.useFakeTimers();
@@ -94,7 +163,12 @@ describe("owner-bound runner pairing", () => {
       enrollment: { label: "staging-web-1", state: "waiting" },
       runner: null,
     });
-    expect(secondView).toEqual({ enrollment: null, runner: null });
+    expect(secondView).toEqual({
+      enrollment: null,
+      latestRecovery: null,
+      runner: null,
+      workload: null,
+    });
     expect(JSON.stringify(firstView)).not.toContain(CODE_DIGEST);
   });
 
@@ -398,5 +472,395 @@ describe("owner-bound runner pairing", () => {
         runnerId: RUNNER_ID,
       }),
     ).resolves.toMatchObject({ status: "accepted" });
+  });
+
+  it("requires a fresh fixed capability and registers one safe owner-bound workload", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await createConnectedRunner(t);
+
+    await expect(t.mutation(registerFixedWorkload, {})).rejects.toThrow(
+      "Authentication required",
+    );
+    await expect(
+      owner.client.mutation(registerFixedWorkload, {}),
+    ).rejects.toThrow(/FIXED_CAPABILITY_UNAVAILABLE/);
+
+    await connectedHeartbeat(t);
+    const first = await owner.client.mutation(registerFixedWorkload, {});
+    const repeated = await owner.client.mutation(registerFixedWorkload, {});
+    expect(repeated).toEqual(first);
+
+    const view = await owner.client.query(listMine, {});
+    expect(view).toMatchObject({
+      workload: {
+        workloadId: CONNECTED_WORKLOAD_ID,
+        healthCheckId: CONNECTED_HEALTH_CHECK_ID,
+        recoveryActionId: CONNECTED_RECOVERY_ACTION_ID,
+        recoveryMode: "approval_required",
+        healthStatus: "unknown",
+      },
+      latestRecovery: null,
+    });
+    const other = await addOwner(t, "other-owner");
+    expect(await other.client.query(listMine, {})).toEqual({
+      enrollment: null,
+      latestRecovery: null,
+      runner: null,
+      workload: null,
+    });
+    const publicOwnerJson = JSON.stringify(view);
+    expect(publicOwnerJson).not.toContain(CREDENTIAL_DIGEST);
+    expect(publicOwnerJson).not.toContain("127.0.0.1");
+    expect(publicOwnerJson).not.toMatch(/command|filePath|healthUrl|ledger/i);
+    expect(
+      await t.run((ctx) => ctx.db.query("managedWorkloads").collect()),
+    ).toHaveLength(1);
+  });
+
+  it("accepts health only from the matching runner and keeps recovery approval-first", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await registerConnectedWorkload(t);
+
+    await expect(owner.client.mutation(requestFixedRecovery, {})).rejects.toThrow(
+      /UNHEALTHY_REPORT_REQUIRED/,
+    );
+    await connectedHeartbeat(t, { healthReport: fixedHealth("healthy") });
+    await expect(owner.client.mutation(requestFixedRecovery, {})).rejects.toThrow(
+      /UNHEALTHY_REPORT_REQUIRED/,
+    );
+    await expect(
+      connectedHeartbeat(t, {
+        credentialDigest: OTHER_CREDENTIAL_DIGEST,
+        healthReport: fixedHealth("unhealthy"),
+      }),
+    ).resolves.toEqual({ status: "unavailable" });
+    await expect(
+      connectedHeartbeat(t, {
+        healthReport: {
+          ...fixedHealth("unhealthy"),
+          workloadId: "another-service",
+        },
+      }),
+    ).rejects.toThrow();
+    await expect(
+      connectedHeartbeat(t, {
+        healthReport: {
+          ...fixedHealth("healthy"),
+          checkedAt: BASE_TIME - 60_000,
+        },
+      }),
+    ).rejects.toThrow();
+
+    await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+    expect((await owner.client.query(listMine, {})).workload).toMatchObject({
+      currentInstanceId: null,
+      lastHealthyInstanceId: "instance-initial",
+    });
+    const requested = await owner.client.mutation(requestFixedRecovery, {});
+    expect(requested).toMatchObject({
+      status: "pending_approval",
+      preActionInstanceId: "instance-initial",
+      postActionInstanceId: null,
+    });
+    await expect(
+      connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") }),
+    ).resolves.toMatchObject({ command: null, workloadRegistered: true });
+
+    const other = await addOwner(t, "decision-intruder");
+    await expect(
+      other.client.mutation(decideFixedRecovery, {
+        commandId: requested.commandId,
+        decision: "approved",
+      }),
+    ).rejects.toThrow(/RECOVERY_NOT_FOUND/);
+    await expect(
+      owner.client.mutation(decideFixedRecovery, {
+        commandId: requested.commandId,
+        decision: "rejected",
+      }),
+    ).resolves.toMatchObject({ status: "rejected" });
+    await expect(
+      owner.client.mutation(decideFixedRecovery, {
+        commandId: requested.commandId,
+        decision: "approved",
+      }),
+    ).rejects.toThrow(/RECOVERY_NOT_PENDING/);
+    expect((await owner.client.query(listMine, {})).latestRecovery).toMatchObject({
+      status: "rejected",
+    });
+  });
+
+  it("allows only one active request and turns an approved recovery into not_needed when health is already fresh", async () => {
+    const t = convexTest(schema, modules);
+    const owner = await registerConnectedWorkload(t);
+    await connectedHeartbeat(t, {
+      healthReport: fixedHealth("healthy", "instance-before-request"),
+    });
+    await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+
+    const requests = await Promise.allSettled([
+      owner.client.mutation(requestFixedRecovery, {}),
+      owner.client.mutation(requestFixedRecovery, {}),
+    ]);
+    expect(requests.filter((result) => result.status === "fulfilled")).toHaveLength(1);
+    expect(requests.filter((result) => result.status === "rejected")).toHaveLength(1);
+    const requested = requests.find((result) => result.status === "fulfilled");
+    if (!requested || requested.status !== "fulfilled") {
+      throw new Error("A recovery request was not created");
+    }
+
+    vi.setSystemTime(BASE_TIME + 9_000);
+    await expect(
+      owner.client.mutation(decideFixedRecovery, {
+        commandId: requested.value.commandId,
+        decision: "approved",
+      }),
+    ).rejects.toThrow(/RUNNER_OR_HEALTH_STALE/);
+
+    await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+    await owner.client.mutation(decideFixedRecovery, {
+      commandId: requested.value.commandId,
+      decision: "approved",
+    });
+    await expect(
+      connectedHeartbeat(t, { healthReport: fixedHealth("healthy") }),
+    ).resolves.toMatchObject({ command: null });
+    expect((await owner.client.query(listMine, {})).latestRecovery).toMatchObject({
+      status: "not_needed",
+      terminalReason: "precondition_changed",
+    });
+  });
+
+  it("claims one approved command once and accepts one idempotent exact healthy result", async () => {
+    const t = convexTest(schema, modules);
+    const { owner, request } = await createPendingRecovery(t);
+    await owner.client.mutation(decideFixedRecovery, {
+      commandId: request.commandId,
+      decision: "approved",
+    });
+
+    await expect(
+      t.mutation(recordHeartbeat, {
+        agentVersion: "0.2.0",
+        clientAddressDigest: CLIENT_ADDRESS_DIGEST,
+        credentialDigest: CREDENTIAL_DIGEST,
+        healthReport: fixedHealth("unhealthy"),
+        requestSecret: SERVER_SECRET,
+        runnerId: RUNNER_ID,
+      }),
+    ).resolves.toMatchObject({ command: null });
+    const claimed = await connectedHeartbeat(t, {
+      healthReport: fixedHealth("unhealthy"),
+    });
+    expect(claimed).toMatchObject({
+      workloadRegistered: true,
+      command: {
+        commandId: request.commandId,
+        actionId: CONNECTED_RECOVERY_ACTION_ID,
+        workloadId: CONNECTED_WORKLOAD_ID,
+      },
+    });
+    expect(claimed.command.executionNonce).toMatch(/^[A-Za-z0-9_-]{1,128}$/);
+    await expect(
+      connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") }),
+    ).resolves.toMatchObject({ command: null });
+
+    const result = {
+      commandId: request.commandId,
+      executionNonce: claimed.command.executionNonce,
+      actionId: CONNECTED_RECOVERY_ACTION_ID,
+      executionResultCode: "restart_succeeded",
+      verificationStatus: "healthy",
+      verificationDetailCode: "exact_http_200",
+      postActionInstanceId: "instance-after-recovery",
+    };
+    await expect(
+      connectedHeartbeat(t, {
+        previousCommandResult: { ...result, verifiedAt: BASE_TIME - 60_000 },
+        healthReport: fixedHealth("healthy", "instance-after-recovery"),
+      }),
+    ).rejects.toThrow();
+    await connectedHeartbeat(t, {
+      previousCommandResult: result,
+      healthReport: fixedHealth("healthy", "instance-after-recovery"),
+    });
+    const completed = (await owner.client.query(listMine, {})).latestRecovery;
+    expect(completed).toMatchObject({
+      status: "succeeded",
+      executionResultCode: "restart_succeeded",
+      verificationDetailCode: "exact_http_200",
+      preActionInstanceId: "instance-before-recovery",
+      postActionInstanceId: "instance-after-recovery",
+    });
+    expect(completed.finishedAt).toEqual(expect.any(Number));
+    expect((await owner.client.query(listMine, {})).workload).toMatchObject({
+      currentInstanceId: "instance-after-recovery",
+      lastHealthyInstanceId: "instance-after-recovery",
+    });
+
+    await connectedHeartbeat(t, {
+      previousCommandResult: result,
+      healthReport: fixedHealth("healthy", "instance-after-recovery"),
+    });
+    expect((await owner.client.query(listMine, {})).latestRecovery).toEqual(
+      completed,
+    );
+  });
+
+  it("never treats process success with unhealthy verification as recovery", async () => {
+    const t = convexTest(schema, modules);
+    const { owner, request } = await createPendingRecovery(t);
+    await owner.client.mutation(decideFixedRecovery, {
+      commandId: request.commandId,
+      decision: "approved",
+    });
+    const claimed = await connectedHeartbeat(t, {
+      healthReport: fixedHealth("unhealthy"),
+    });
+
+    await connectedHeartbeat(t, {
+      previousCommandResult: {
+        commandId: request.commandId,
+        executionNonce: claimed.command.executionNonce,
+        actionId: CONNECTED_RECOVERY_ACTION_ID,
+        executionResultCode: "restart_succeeded",
+        verificationStatus: "unhealthy",
+        verificationDetailCode: "connection_failed",
+      },
+      healthReport: fixedHealth("unhealthy"),
+    });
+
+    expect((await owner.client.query(listMine, {})).latestRecovery).toMatchObject({
+      status: "failed",
+      terminalReason: "verification_failed",
+    });
+  });
+
+  it("never treats the pre-action instance as fresh recovery proof", async () => {
+    const t = convexTest(schema, modules);
+    const { owner, request } = await createPendingRecovery(t);
+    await owner.client.mutation(decideFixedRecovery, {
+      commandId: request.commandId,
+      decision: "approved",
+    });
+    const claimed = await connectedHeartbeat(t, {
+      healthReport: fixedHealth("unhealthy"),
+    });
+
+    await connectedHeartbeat(t, {
+      previousCommandResult: {
+        commandId: request.commandId,
+        executionNonce: claimed.command.executionNonce,
+        actionId: CONNECTED_RECOVERY_ACTION_ID,
+        executionResultCode: "restart_succeeded",
+        verificationStatus: "healthy",
+        verificationDetailCode: "exact_http_200",
+        postActionInstanceId: "instance-before-recovery",
+      },
+      healthReport: fixedHealth("healthy", "instance-before-recovery"),
+    });
+
+    expect((await owner.client.query(listMine, {})).latestRecovery).toMatchObject({
+      status: "failed",
+      terminalReason: "verification_failed",
+      preActionInstanceId: "instance-before-recovery",
+      postActionInstanceId: "instance-before-recovery",
+    });
+  });
+
+  it("expires unclaimed work on revoke but records claimed work as execution_unknown", async () => {
+    const beforeClaim = convexTest(schema, modules);
+    const pending = await createPendingRecovery(beforeClaim, "revoke-before");
+    await pending.owner.client.mutation(decideFixedRecovery, {
+      commandId: pending.request.commandId,
+      decision: "approved",
+    });
+    await pending.owner.client.mutation(revoke, { runnerId: RUNNER_ID });
+    expect(
+      (await pending.owner.client.query(listMine, {})).latestRecovery,
+    ).toMatchObject({
+      status: "expired",
+      terminalReason: "runner_revoked_before_claim",
+    });
+
+    const afterClaim = convexTest(schema, modules);
+    const claimedRecovery = await createPendingRecovery(afterClaim, "revoke-after");
+    await claimedRecovery.owner.client.mutation(decideFixedRecovery, {
+      commandId: claimedRecovery.request.commandId,
+      decision: "approved",
+    });
+    await connectedHeartbeat(afterClaim, {
+      healthReport: fixedHealth("unhealthy"),
+    });
+    await claimedRecovery.owner.client.mutation(revoke, { runnerId: RUNNER_ID });
+    expect(
+      (await claimedRecovery.owner.client.query(listMine, {})).latestRecovery,
+    ).toMatchObject({
+      status: "execution_unknown",
+      terminalReason: "runner_revoked_after_claim",
+    });
+  });
+
+  it("watchdog terminalizes pending, approved, and claimed work in a bounded batch", async () => {
+    const pendingHarness = convexTest(schema, modules);
+    const pending = await createPendingRecovery(pendingHarness, "pending-timeout");
+    vi.setSystemTime(BASE_TIME + 5 * 60_000);
+    await pendingHarness.mutation(watchFixedRecoveryCommands, {});
+    expect(
+      (await pending.owner.client.query(listMine, {})).latestRecovery,
+    ).toMatchObject({ status: "expired", terminalReason: "approval_expired" });
+
+    vi.setSystemTime(BASE_TIME);
+    const approvedHarness = convexTest(schema, modules);
+    const approved = await createPendingRecovery(approvedHarness, "approved-timeout");
+    await approved.owner.client.mutation(decideFixedRecovery, {
+      commandId: approved.request.commandId,
+      decision: "approved",
+    });
+    vi.setSystemTime(BASE_TIME + 30_000);
+    await approvedHarness.mutation(watchFixedRecoveryCommands, {});
+    expect(
+      (await approved.owner.client.query(listMine, {})).latestRecovery,
+    ).toMatchObject({ status: "expired", terminalReason: "command_expired" });
+
+    vi.setSystemTime(BASE_TIME);
+    const claimedHarness = convexTest(schema, modules);
+    const claimed = await createPendingRecovery(claimedHarness, "claimed-timeout");
+    await claimed.owner.client.mutation(decideFixedRecovery, {
+      commandId: claimed.request.commandId,
+      decision: "approved",
+    });
+    await connectedHeartbeat(claimedHarness, {
+      healthReport: fixedHealth("unhealthy"),
+    });
+    vi.setSystemTime(BASE_TIME + 15_000);
+    await claimedHarness.mutation(watchFixedRecoveryCommands, {});
+    expect(
+      (await claimed.owner.client.query(listMine, {})).latestRecovery,
+    ).toMatchObject({
+      status: "execution_unknown",
+      terminalReason: "runner_lost_during_action",
+    });
+  });
+
+  it("cannot approve a pending request at its exact deadline", async () => {
+    const t = convexTest(schema, modules);
+    const { owner, request } = await createPendingRecovery(t, "expired-decision");
+    vi.setSystemTime(BASE_TIME + 5 * 60_000);
+    await connectedHeartbeat(t, { healthReport: fixedHealth("unhealthy") });
+
+    await expect(
+      owner.client.mutation(decideFixedRecovery, {
+        commandId: request.commandId,
+        decision: "approved",
+      }),
+    ).resolves.toMatchObject({
+      status: "expired",
+      terminalReason: "approval_expired",
+    });
+    expect((await owner.client.query(listMine, {})).latestRecovery).toMatchObject({
+      status: "expired",
+      terminalReason: "approval_expired",
+    });
   });
 });

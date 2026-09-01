@@ -1,19 +1,16 @@
 import { createHash } from "node:crypto";
 
+import {
+  connectedRunnerHeartbeatRequestSchema,
+  connectedRunnerHeartbeatResponseSchema,
+} from "@/lib/connected-runner-protocol";
 import { recordRunnerHeartbeat } from "@/lib/server/runner-enrollment";
 import { isJsonContentType, readLimitedBody } from "@/lib/server/http-body";
 import { runnerClientAddressDigest } from "@/lib/server/runner-client-address";
-import { z } from "zod";
 
 export const runtime = "nodejs";
 
-const MAX_BODY_BYTES = 1_024;
-const heartbeatSchema = z
-  .object({
-    runnerId: z.string().regex(/^gxr_[A-Za-z0-9_-]{24}$/),
-    agentVersion: z.string().regex(/^[A-Za-z0-9._-]{1,32}$/),
-  })
-  .strict();
+const MAX_BODY_BYTES = 2_048;
 
 function noStoreHeaders() {
   return { "Cache-Control": "no-store, max-age=0" };
@@ -62,7 +59,7 @@ export async function POST(request: Request) {
     } catch {
       return json({ error: "Request body is invalid" }, 400);
     }
-    const parsed = heartbeatSchema.safeParse(value);
+    const parsed = connectedRunnerHeartbeatRequestSchema.safeParse(value);
     if (!parsed.success) {
       return json({ error: "Request body is invalid" }, 400);
     }
@@ -83,7 +80,12 @@ export async function POST(request: Request) {
       );
     }
 
-    return new Response(null, { status: 204, headers: noStoreHeaders() });
+    const responseBody = connectedRunnerHeartbeatResponseSchema.parse({
+      heartbeatIntervalMs: result.heartbeatIntervalMs,
+      workloadRegistered: result.workloadRegistered,
+      command: result.command,
+    });
+    return json(responseBody, 200);
   } catch {
     return json({ error: "Heartbeat is temporarily unavailable" }, 500);
   }

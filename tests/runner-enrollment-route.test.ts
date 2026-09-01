@@ -17,6 +17,13 @@ import { POST as heartbeat } from "@/app/api/runners/heartbeat/route";
 const APP_ORIGIN = "https://autonomous-devops-agent.vercel.app";
 const PAIRING_CODE = `gxpair_${"a".repeat(43)}`;
 const RUNNER_CREDENTIAL = `gxrun_${"b".repeat(43)}`;
+const RUNNER_ID = "gxr_abcdefghijklmnopqrstuvwx";
+const CAPABILITY_ID = "fixed_disposable_service_v1";
+const WORKLOAD_ID = "connected-demo-service";
+const HEALTH_CHECK_ID = "check-connected-demo-service-health";
+const ACTION_ID = "restart-connected-demo-service";
+const COMMAND_ID = "command_123";
+const EXECUTION_NONCE = "execution_nonce_123";
 
 function jsonRequest(path: string, body: unknown, headers?: HeadersInit) {
   return new Request(`${APP_ORIGIN}${path}`, {
@@ -39,7 +46,12 @@ describe("runner enrollment routes", () => {
         status: "paired",
       }),
     );
-    serverMock.recordRunnerHeartbeat.mockResolvedValue({ status: "accepted" });
+    serverMock.recordRunnerHeartbeat.mockResolvedValue({
+      status: "accepted",
+      heartbeatIntervalMs: 2_000,
+      workloadRegistered: false,
+      command: null,
+    });
   });
 
   afterEach(() => {
@@ -234,17 +246,23 @@ describe("runner enrollment routes", () => {
     expect(text).not.toMatch(/expired|reused|unknown/i);
   });
 
-  it("records a heartbeat using only a credential digest", async () => {
+  it("keeps the legacy heartbeat body compatible and returns a bounded command envelope", async () => {
     const response = await heartbeat(
       jsonRequest(
         "/api/runners/heartbeat",
-        { agentVersion: "0.1.0", runnerId: "gxr_abcdefghijklmnopqrstuvwx" },
+        { agentVersion: "0.1.0", runnerId: RUNNER_ID },
         { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
       ),
     );
+    const body = await response.json();
 
-    expect(response.status).toBe(204);
+    expect(response.status).toBe(200);
     expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(body).toEqual({
+      heartbeatIntervalMs: 2_000,
+      workloadRegistered: false,
+      command: null,
+    });
     const call = serverMock.recordRunnerHeartbeat.mock.calls[0]?.[0] as Record<
       string,
       unknown
@@ -253,6 +271,396 @@ describe("runner enrollment routes", () => {
     expect(call.credentialDigest).toMatch(/^[a-f0-9]{64}$/);
     expect(call).not.toHaveProperty("credential");
     expect(JSON.stringify(call)).not.toContain(RUNNER_CREDENTIAL);
+  });
+
+  it("passes only the exact fixed capability and healthy workload report", async () => {
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        {
+          agentVersion: "0.2.0",
+          runnerId: RUNNER_ID,
+          capabilityId: CAPABILITY_ID,
+          healthReport: {
+            workloadId: WORKLOAD_ID,
+            healthCheckId: HEALTH_CHECK_ID,
+            healthStatus: "healthy",
+            detailCode: "exact_http_200",
+            instanceId: "service_instance_1",
+          },
+        },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(serverMock.recordRunnerHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        capabilityId: CAPABILITY_ID,
+        healthReport: {
+          workloadId: WORKLOAD_ID,
+          healthCheckId: HEALTH_CHECK_ID,
+          healthStatus: "healthy",
+          detailCode: "exact_http_200",
+          instanceId: "service_instance_1",
+        },
+      }),
+    );
+  });
+
+  it("accepts the exact unhealthy report without an instance ID", async () => {
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        {
+          agentVersion: "0.2.0",
+          runnerId: RUNNER_ID,
+          capabilityId: CAPABILITY_ID,
+          healthReport: {
+            workloadId: WORKLOAD_ID,
+            healthCheckId: HEALTH_CHECK_ID,
+            healthStatus: "unhealthy",
+            detailCode: "connection_failed",
+          },
+        },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(serverMock.recordRunnerHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({
+        healthReport: expect.objectContaining({
+          healthStatus: "unhealthy",
+          detailCode: "connection_failed",
+        }),
+      }),
+    );
+  });
+
+  it("passes an exact prior command result bound to its execution nonce", async () => {
+    const previousCommandResult = {
+      commandId: COMMAND_ID,
+      executionNonce: EXECUTION_NONCE,
+      actionId: ACTION_ID,
+      executionResultCode: "restart_succeeded",
+      verificationStatus: "healthy",
+      verificationDetailCode: "exact_http_200",
+      postActionInstanceId: "service_instance_2",
+    };
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        {
+          agentVersion: "0.2.0",
+          runnerId: RUNNER_ID,
+          capabilityId: CAPABILITY_ID,
+          previousCommandResult,
+        },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(serverMock.recordRunnerHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining({ previousCommandResult }),
+    );
+  });
+
+  it("accepts the largest request allowed by the heartbeat protocol", async () => {
+    const body = {
+      agentVersion: "v".repeat(32),
+      runnerId: RUNNER_ID,
+      capabilityId: CAPABILITY_ID,
+      healthReport: {
+        workloadId: WORKLOAD_ID,
+        healthCheckId: HEALTH_CHECK_ID,
+        healthStatus: "healthy",
+        detailCode: "exact_http_200",
+        instanceId: "h".repeat(128),
+      },
+      previousCommandResult: {
+        commandId: "c".repeat(128),
+        executionNonce: "n".repeat(128),
+        actionId: ACTION_ID,
+        executionResultCode: "restart_succeeded",
+        verificationStatus: "healthy",
+        verificationDetailCode: "exact_http_200",
+        postActionInstanceId: "p".repeat(128),
+      },
+    };
+
+    expect(JSON.stringify(body).length).toBeGreaterThan(1_024);
+
+    const response = await heartbeat(
+      jsonRequest("/api/runners/heartbeat", body, {
+        Authorization: `Bearer ${RUNNER_CREDENTIAL}`,
+      }),
+    );
+
+    expect(response.status).toBe(200);
+    expect(serverMock.recordRunnerHeartbeat).toHaveBeenCalledWith(
+      expect.objectContaining(body),
+    );
+  });
+
+  it("returns only the fixed bounded command response", async () => {
+    serverMock.recordRunnerHeartbeat.mockResolvedValue({
+      status: "accepted",
+      heartbeatIntervalMs: 2_000,
+      workloadRegistered: true,
+      command: {
+        commandId: COMMAND_ID,
+        executionNonce: EXECUTION_NONCE,
+        workloadId: WORKLOAD_ID,
+        actionId: ACTION_ID,
+      },
+    });
+
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        { agentVersion: "0.2.0", runnerId: RUNNER_ID },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(await response.json()).toEqual({
+      heartbeatIntervalMs: 2_000,
+      workloadRegistered: true,
+      command: {
+        commandId: COMMAND_ID,
+        executionNonce: EXECUTION_NONCE,
+        workloadId: WORKLOAD_ID,
+        actionId: ACTION_ID,
+      },
+    });
+  });
+
+  it.each([
+    [
+      "unknown root field",
+      {
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        command: "restart-connected-demo-service",
+      },
+    ],
+    [
+      "caller-supplied health URL",
+      {
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        capabilityId: CAPABILITY_ID,
+        healthReport: {
+          workloadId: WORKLOAD_ID,
+          healthCheckId: HEALTH_CHECK_ID,
+          healthStatus: "healthy",
+          detailCode: "exact_http_200",
+          instanceId: "service_instance_1",
+          url: "http://127.0.0.1:3001/health",
+        },
+      },
+    ],
+    [
+      "caller-supplied local path",
+      {
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        capabilityId: CAPABILITY_ID,
+        path: "/tmp/service.mjs",
+      },
+    ],
+    [
+      "healthy report without an instance ID",
+      {
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        capabilityId: CAPABILITY_ID,
+        healthReport: {
+          workloadId: WORKLOAD_ID,
+          healthCheckId: HEALTH_CHECK_ID,
+          healthStatus: "healthy",
+          detailCode: "exact_http_200",
+        },
+      },
+    ],
+    [
+      "unhealthy report with healthy evidence",
+      {
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        capabilityId: CAPABILITY_ID,
+        healthReport: {
+          workloadId: WORKLOAD_ID,
+          healthCheckId: HEALTH_CHECK_ID,
+          healthStatus: "unhealthy",
+          detailCode: "exact_http_200",
+        },
+      },
+    ],
+    [
+      "malformed command ID",
+      {
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        previousCommandResult: {
+          commandId: "bad command id",
+          executionNonce: EXECUTION_NONCE,
+          actionId: ACTION_ID,
+          executionResultCode: "restart_failed",
+          verificationStatus: "unhealthy",
+          verificationDetailCode: "request_timeout",
+        },
+      },
+    ],
+    [
+      "malformed execution nonce",
+      {
+        agentVersion: "0.2.0",
+        runnerId: RUNNER_ID,
+        previousCommandResult: {
+          commandId: COMMAND_ID,
+          executionNonce: "nonce with spaces",
+          actionId: ACTION_ID,
+          executionResultCode: "restart_failed",
+          verificationStatus: "unhealthy",
+          verificationDetailCode: "request_timeout",
+        },
+      },
+    ],
+  ])("rejects %s before contacting Convex", async (_label, body) => {
+    const response = await heartbeat(
+      jsonRequest("/api/runners/heartbeat", body, {
+        Authorization: `Bearer ${RUNNER_CREDENTIAL}`,
+      }),
+    );
+
+    expect(response.status).toBe(400);
+    expect(serverMock.recordRunnerHeartbeat).not.toHaveBeenCalled();
+  });
+
+  it("rejects an oversized heartbeat body before contacting Convex", async () => {
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        {
+          agentVersion: "0.2.0",
+          runnerId: RUNNER_ID,
+          padding: "x".repeat(4_096),
+        },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+
+    expect(response.status).toBe(413);
+    expect(serverMock.recordRunnerHeartbeat).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "missing content type",
+      new Request(`${APP_ORIGIN}/api/runners/heartbeat`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+        body: JSON.stringify({ agentVersion: "0.1.0", runnerId: RUNNER_ID }),
+      }),
+    ],
+    [
+      "JSON lookalike content type",
+      new Request(`${APP_ORIGIN}/api/runners/heartbeat`, {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${RUNNER_CREDENTIAL}`,
+          "Content-Type": "application/jsonp",
+        },
+        body: JSON.stringify({ agentVersion: "0.1.0", runnerId: RUNNER_ID }),
+      }),
+    ],
+  ])("rejects a heartbeat with %s", async (_label, request) => {
+    const response = await heartbeat(request);
+
+    expect(response.status).toBe(415);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(serverMock.recordRunnerHeartbeat).not.toHaveBeenCalled();
+  });
+
+  it("hashes Vercel's trusted client address for heartbeat requests", async () => {
+    const body = { agentVersion: "0.1.0", runnerId: RUNNER_ID };
+    await heartbeat(
+      jsonRequest("/api/runners/heartbeat", body, {
+        Authorization: `Bearer ${RUNNER_CREDENTIAL}`,
+        "x-forwarded-for": "198.51.100.10",
+        "x-vercel-forwarded-for": "203.0.113.55",
+      }),
+    );
+    await heartbeat(
+      jsonRequest("/api/runners/heartbeat", body, {
+        Authorization: `Bearer ${RUNNER_CREDENTIAL}`,
+        "x-forwarded-for": "198.51.100.11",
+        "x-vercel-forwarded-for": "203.0.113.55",
+      }),
+    );
+
+    const first = serverMock.recordRunnerHeartbeat.mock.calls[0]?.[0];
+    const second = serverMock.recordRunnerHeartbeat.mock.calls[1]?.[0];
+    expect(first.clientAddressDigest).toBe(second.clientAddressDigest);
+    expect(JSON.stringify(first)).not.toContain("203.0.113.55");
+    expect(JSON.stringify(first)).not.toContain("198.51.100.10");
+  });
+
+  it("rejects malformed command output from the backend without exposing it", async () => {
+    serverMock.recordRunnerHeartbeat.mockResolvedValue({
+      status: "accepted",
+      heartbeatIntervalMs: 2_000,
+      workloadRegistered: true,
+      command: {
+        commandId: COMMAND_ID,
+        executionNonce: EXECUTION_NONCE,
+        workloadId: WORKLOAD_ID,
+        actionId: ACTION_ID,
+        path: "/tmp/service.mjs",
+      },
+    });
+
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        { agentVersion: "0.2.0", runnerId: RUNNER_ID },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+    const text = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(text).toContain("Heartbeat is temporarily unavailable");
+    expect(text).not.toContain("/tmp/service.mjs");
+  });
+
+  it("returns one generic no-store error when the backend fails", async () => {
+    serverMock.recordRunnerHeartbeat.mockRejectedValue(
+      new Error(`backend failed for ${RUNNER_CREDENTIAL}`),
+    );
+
+    const response = await heartbeat(
+      jsonRequest(
+        "/api/runners/heartbeat",
+        { agentVersion: "0.1.0", runnerId: RUNNER_ID },
+        { Authorization: `Bearer ${RUNNER_CREDENTIAL}` },
+      ),
+    );
+    const text = await response.text();
+
+    expect(response.status).toBe(500);
+    expect(response.headers.get("cache-control")).toContain("no-store");
+    expect(text).toContain("Heartbeat is temporarily unavailable");
+    expect(text).not.toContain(RUNNER_CREDENTIAL);
+    expect(text).not.toContain("backend failed");
   });
 
   it.each([

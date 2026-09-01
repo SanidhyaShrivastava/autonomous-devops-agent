@@ -11,4 +11,11 @@ crons.interval(
   {},
 );
 
+crons.interval(
+  "watch connected recovery commands",
+  { seconds: 2 },
+  internal.runners.watchFixedRecoveryCommands,
+  {},
+);
+
 export default crons;

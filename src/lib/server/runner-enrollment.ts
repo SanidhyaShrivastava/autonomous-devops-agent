@@ -3,6 +3,15 @@ import "server-only";
 import { fetchMutation } from "convex/nextjs";
 
 import { api } from "../../../convex/_generated/api";
+import type { Id } from "../../../convex/_generated/dataModel";
+import {
+  CONNECTED_HEARTBEAT_INTERVAL_MS,
+  CONNECTED_RUNNER_CAPABILITY_ID,
+  connectedRunnerHeartbeatResponseSchema,
+  type ConnectedCommandResult,
+  type ConnectedHealthReport,
+  type ConnectedRecoveryCommand,
+} from "../connected-runner-protocol";
 
 type RunnerArchitecture = "x64" | "arm64";
 
@@ -51,15 +60,30 @@ export async function recordRunnerHeartbeat(args: {
   runnerId: string;
   credentialDigest: string;
   agentVersion: string;
+  capabilityId?: typeof CONNECTED_RUNNER_CAPABILITY_ID;
+  healthReport?: ConnectedHealthReport;
+  previousCommandResult?: ConnectedCommandResult;
 }): Promise<
-  | { status: "accepted" }
+  | {
+      status: "accepted";
+      heartbeatIntervalMs: typeof CONNECTED_HEARTBEAT_INTERVAL_MS;
+      workloadRegistered: boolean;
+      command: ConnectedRecoveryCommand | null;
+    }
   | { status: "unavailable" }
   | { status: "rate_limited"; retryAfterSeconds: number }
 > {
+  const previousCommandResult = args.previousCommandResult
+    ? {
+        ...args.previousCommandResult,
+        commandId: args.previousCommandResult.commandId as Id<"runnerRecoveryRequests">,
+      }
+    : undefined;
   const result = await fetchMutation(
     api.runners.recordHeartbeat,
     {
       ...args,
+      previousCommandResult,
       requestSecret: requiredServerEnvironment("RUNNER_PAIRING_REQUEST_SECRET"),
     },
     { url: requiredServerEnvironment("CONVEX_URL") },
@@ -70,5 +94,12 @@ export async function recordRunnerHeartbeat(args: {
       retryAfterSeconds: result.retryAfterSeconds,
     };
   }
-  return { status: result.status };
+  if (result.status === "unavailable") return result;
+
+  const response = connectedRunnerHeartbeatResponseSchema.parse({
+    heartbeatIntervalMs: CONNECTED_HEARTBEAT_INTERVAL_MS,
+    workloadRegistered: result.workloadRegistered,
+    command: result.command ?? null,
+  });
+  return { status: "accepted", ...response };
 }

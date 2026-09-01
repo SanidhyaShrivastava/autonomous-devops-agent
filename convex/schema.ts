@@ -2,6 +2,13 @@ import { defineSchema, defineTable } from "convex/server";
 import { v } from "convex/values";
 import { authTables } from "@convex-dev/auth/server";
 
+import {
+  CONNECTED_HEALTH_CHECK_ID,
+  CONNECTED_RECOVERY_ACTION_ID,
+  CONNECTED_RUNNER_CAPABILITY_ID,
+  CONNECTED_WORKLOAD_ID,
+} from "../src/lib/connected-runner-protocol";
+
 const demoCommandStatus = v.union(
   v.literal("queued"),
   v.literal("claimed"),
@@ -89,6 +96,38 @@ const runnerArchitecture = v.union(
   v.literal("arm64"),
 );
 
+const connectedHealthDetailCode = v.union(
+  v.literal("not_reported"),
+  v.literal("exact_http_200"),
+  v.literal("connection_failed"),
+  v.literal("request_timeout"),
+  v.literal("unexpected_response"),
+);
+
+const connectedRecoveryStatus = v.union(
+  v.literal("pending_approval"),
+  v.literal("approved"),
+  v.literal("claimed"),
+  v.literal("succeeded"),
+  v.literal("failed"),
+  v.literal("execution_unknown"),
+  v.literal("rejected"),
+  v.literal("expired"),
+  v.literal("not_needed"),
+);
+
+const connectedRecoveryTerminalReason = v.union(
+  v.literal("owner_rejected"),
+  v.literal("approval_expired"),
+  v.literal("command_expired"),
+  v.literal("runner_lost_during_action"),
+  v.literal("runner_revoked_before_claim"),
+  v.literal("runner_revoked_after_claim"),
+  v.literal("precondition_changed"),
+  v.literal("execution_failed"),
+  v.literal("verification_failed"),
+);
+
 export default defineSchema({
   ...authTables,
 
@@ -121,6 +160,8 @@ export default defineSchema({
     agentVersion: v.string(),
     pairedAt: v.number(),
     lastHeartbeatAt: v.optional(v.number()),
+    capabilityId: v.optional(v.literal(CONNECTED_RUNNER_CAPABILITY_ID)),
+    capabilityReportedAt: v.optional(v.number()),
     revokedAt: v.optional(v.number()),
   })
     .index("by_runner_id", ["runnerId"])
@@ -142,6 +183,60 @@ export default defineSchema({
     bucketCount: v.number(),
     capacityDeniedCount: v.optional(v.number()),
   }).index("by_key", ["key"]),
+
+  managedWorkloads: defineTable({
+    ownerId: v.id("users"),
+    runnerRecordId: v.id("registeredRunners"),
+    runnerId: v.string(),
+    workloadId: v.literal(CONNECTED_WORKLOAD_ID),
+    healthCheckId: v.literal(CONNECTED_HEALTH_CHECK_ID),
+    recoveryActionId: v.literal(CONNECTED_RECOVERY_ACTION_ID),
+    recoveryMode: v.literal("approval_required"),
+    registeredAt: v.number(),
+    healthStatus: v.union(
+      v.literal("unknown"),
+      v.literal("healthy"),
+      v.literal("unhealthy"),
+    ),
+    healthDetailCode: connectedHealthDetailCode,
+    healthReportedAt: v.optional(v.number()),
+    lastHealthyInstanceId: v.optional(v.string()),
+    stateVersion: v.number(),
+  })
+    .index("by_runner_record", ["runnerRecordId"])
+    .index("by_owner_registered_at", ["ownerId", "registeredAt"]),
+
+  runnerRecoveryRequests: defineTable({
+    ownerId: v.id("users"),
+    workloadRecordId: v.id("managedWorkloads"),
+    runnerRecordId: v.id("registeredRunners"),
+    runnerId: v.string(),
+    workloadId: v.literal(CONNECTED_WORKLOAD_ID),
+    actionId: v.literal(CONNECTED_RECOVERY_ACTION_ID),
+    status: connectedRecoveryStatus,
+    createdAt: v.number(),
+    deadlineAt: v.number(),
+    preActionInstanceId: v.string(),
+    approvalDecidedAt: v.optional(v.number()),
+    approvedAt: v.optional(v.number()),
+    claimedAt: v.optional(v.number()),
+    leaseExpiresAt: v.optional(v.number()),
+    executionNonce: v.optional(v.string()),
+    executionResultCode: v.optional(
+      v.union(v.literal("restart_succeeded"), v.literal("restart_failed")),
+    ),
+    verificationStatus: v.optional(
+      v.union(v.literal("healthy"), v.literal("unhealthy")),
+    ),
+    verificationDetailCode: v.optional(connectedHealthDetailCode),
+    postActionInstanceId: v.optional(v.string()),
+    terminalReason: v.optional(connectedRecoveryTerminalReason),
+    finishedAt: v.optional(v.number()),
+    stateVersion: v.number(),
+  })
+    .index("by_workload_created_at", ["workloadRecordId", "createdAt"])
+    .index("by_runner_status_created_at", ["runnerId", "status", "createdAt"])
+    .index("by_status_deadline", ["status", "deadlineAt"]),
 
   demoControl: defineTable({
     key: v.literal("singleton"),
