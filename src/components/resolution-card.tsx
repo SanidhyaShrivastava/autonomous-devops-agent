@@ -1,6 +1,7 @@
 import type { FunctionReturnType } from "convex/server";
 
 import { api } from "../../convex/_generated/api";
+import type { PublicApproval } from "./approval-gate";
 
 type PublicDemoState = FunctionReturnType<typeof api.demo.getPublicState>;
 type PublicIncident = NonNullable<PublicDemoState["incident"]>;
@@ -48,7 +49,26 @@ function lastStepOfKinds(steps: PublicStep[], kinds: string[]) {
   return null;
 }
 
-function outcomeFor(incident: PublicIncident | null) {
+function outcomeFor(
+  incident: PublicIncident | null,
+  approval: PublicApproval | null,
+) {
+  if (approval?.status === "rejected") {
+    return {
+      label: "Staged restart rejected",
+      tone: "warning",
+      health: "No recovery action was authorized",
+    } as const;
+  }
+
+  if (approval?.status === "expired") {
+    return {
+      label: "Approval window expired",
+      tone: "warning",
+      health: "No recovery action was authorized",
+    } as const;
+  }
+
   switch (incident?.currentPhase) {
     case "resolved":
       return {
@@ -64,6 +84,12 @@ function outcomeFor(incident: PublicIncident | null) {
           incident.finalHealth === "healthy"
             ? "Healthy without an agent action"
             : "No verified recovery",
+      } as const;
+    case "awaiting_approval":
+      return {
+        label: "Restart awaiting browser approval",
+        tone: "warning",
+        health: "Service remains stopped",
       } as const;
     case "failed_recovery":
       return {
@@ -86,7 +112,22 @@ function outcomeFor(incident: PublicIncident | null) {
   }
 }
 
-function humanIntervention(incident: PublicIncident | null) {
+function humanIntervention(
+  incident: PublicIncident | null,
+  executionMode: "autonomous" | "approval_required",
+  approval: PublicApproval | null,
+) {
+  switch (approval?.status) {
+    case "pending":
+      return "Awaiting browser decision";
+    case "approved":
+      return "Approved · no identity recorded";
+    case "rejected":
+      return "Rejected · no identity recorded";
+    case "expired":
+      return "Expired without a decision";
+  }
+
   if (!incident) {
     return "Not available";
   }
@@ -103,7 +144,7 @@ function humanIntervention(incident: PublicIncident | null) {
     incident.currentPhase === "resolved" ||
     incident.currentPhase === "failed_recovery"
   ) {
-    return "None";
+    return executionMode === "autonomous" ? "Not required" : "Recorded";
   }
 
   return "Pending";
@@ -114,13 +155,17 @@ export function ResolutionCard({
   result,
   steps,
   runnerOnline,
+  executionMode,
+  approval,
 }: {
   incident: PublicDemoState["incident"];
   result: PublicDemoState["result"];
   steps: PublicStep[];
   runnerOnline: boolean;
+  executionMode: "autonomous" | "approval_required";
+  approval: PublicApproval | null;
 }) {
-  const outcome = outcomeFor(incident);
+  const outcome = outcomeFor(incident, approval);
   const recoveryState = incident;
   const lastCompletedStep =
     recoveryState?.lastCompletedStepSequence !== null &&
@@ -151,28 +196,54 @@ export function ResolutionCard({
     ? recoveryStep.kind === "recovery_failed"
       ? `${recoveryStep.safeCommandLabel} · attempt failed`
       : recoveryStep.safeCommandLabel
-    : "No recovery action executed";
+    : approval?.status === "pending" || approval?.status === "approved"
+      ? approval.actionLabel
+      : "No recovery action executed";
+  const actionTerm = recoveryStep
+    ? "Executed action"
+    : approval
+      ? "Proposed action"
+      : "Executed action";
+  const verificationCopy =
+    !verificationStep && approval
+      ? approval.status === "approved"
+        ? "Waiting for a fresh check"
+        : "Not run"
+      : outcome.health;
   const confidence =
     incident?.confidence === null || incident?.confidence === undefined
       ? null
       : `${Math.round(incident.confidence * 100)}% confidence`;
+  const outcomeSignalLabel = approval
+    ? humanize(approval.status)
+    : incident?.currentPhase
+      ? humanize(incident.currentPhase)
+      : "Waiting";
 
   return (
     <aside className="panel resolution-panel" aria-labelledby="resolution-title">
       <div className="panel-heading">
         <div>
-          <p className="section-kicker">Measured outcome</p>
+          <p className="section-kicker">
+            {approval?.status === "pending"
+              ? "Proposed recovery"
+              : "Measured outcome"}
+          </p>
           <h2 id="resolution-title">Resolution record</h2>
         </div>
         <span className={`outcome-signal outcome-${outcome.tone}`}>
           <span className="status-dot" aria-hidden="true" />
-          {incident?.currentPhase ? humanize(incident.currentPhase) : "Waiting"}
+          {outcomeSignalLabel}
         </span>
       </div>
 
       <div className={`outcome-banner outcome-banner-${outcome.tone}`}>
         <span className="outcome-path" aria-hidden="true">
-          {incident ? "FAILED →" : "—"}
+          {incident
+            ? approval?.status === "pending"
+              ? "FAILED → APPROVAL"
+              : "FAILED →"
+            : "—"}
         </span>
         <strong>{outcome.label}</strong>
         <span>{outcome.health}</span>
@@ -203,15 +274,18 @@ export function ResolutionCard({
           </dd>
         </div>
         <div>
-          <dt>Executed action</dt>
+          <dt>{actionTerm}</dt>
           <dd>
             <code>{recoveryAction}</code>
+            {!recoveryStep && approval?.status === "pending" ? (
+              <small>Not executed · waiting for a browser decision</small>
+            ) : null}
           </dd>
         </div>
         <div>
           <dt>Fresh verification</dt>
           <dd>
-            {outcome.health}
+            {verificationCopy}
             {verificationStep?.sanitizedOutput ? (
               <code className="verification-evidence">
                 {verificationStep.sanitizedOutput}
@@ -220,8 +294,12 @@ export function ResolutionCard({
           </dd>
         </div>
         <div>
-          <dt>Human intervention</dt>
-          <dd>{humanIntervention(incident)}</dd>
+          <dt>
+            {executionMode === "approval_required"
+              ? "Browser decision"
+              : "Human intervention"}
+          </dt>
+          <dd>{humanIntervention(incident, executionMode, approval)}</dd>
         </div>
         <div>
           <dt>Recovery time</dt>

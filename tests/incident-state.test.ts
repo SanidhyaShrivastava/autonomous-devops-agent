@@ -1,9 +1,13 @@
 import { describe, expect, it } from "vitest";
 
 import {
+  APPROVAL_STATUSES,
   DiagnosisSchema,
+  EXECUTION_MODES,
   INCIDENT_ACTIVE_PHASES,
   INCIDENT_TERMINAL_STATES,
+  type ApprovalStatus,
+  type ExecutionMode,
   type IncidentState,
 } from "../src/lib/contracts";
 import {
@@ -43,11 +47,22 @@ function freshExecutionStartContext(): IncidentTransitionContext {
   };
 }
 
+function approvedExecutionStartContext(): IncidentTransitionContext {
+  return {
+    ...freshExecutionStartContext(),
+    executionMode: "approval_required",
+    approvalStatus: "approved",
+  };
+}
+
 const ALLOWED_TRANSITIONS = new Set([
   "failed_detected->investigating",
   "investigating->manager_review",
   "manager_review->policy_check",
   "policy_check->executing",
+  "policy_check->awaiting_approval",
+  "awaiting_approval->executing",
+  "awaiting_approval->needs_human",
   "executing->verifying",
   "verifying->resolved",
   "investigating->needs_human",
@@ -71,6 +86,18 @@ describe("incident transition contract", () => {
         const context =
           edge === "verifying->resolved"
             ? freshRecoveryContext()
+            : edge === "policy_check->awaiting_approval"
+              ? {
+                  executionMode: "approval_required" as const,
+                  approvalStatus: "pending" as const,
+                }
+              : edge === "awaiting_approval->executing"
+                ? approvedExecutionStartContext()
+                : edge === "awaiting_approval->needs_human"
+                  ? {
+                      executionMode: "approval_required" as const,
+                      approvalStatus: "rejected" as const,
+                    }
             : edge === "policy_check->executing"
               ? freshExecutionStartContext()
               : undefined;
@@ -124,6 +151,106 @@ describe("execution idempotency", () => {
       allowed: false,
       reason: "duplicate_execution",
     });
+  });
+
+  it("does not let approval-required execution bypass the approval phase", () => {
+    expect(
+      attemptIncidentTransition({
+        current: "policy_check",
+        next: "executing",
+        context: {
+          ...freshExecutionStartContext(),
+          executionMode: "approval_required",
+        },
+      }),
+    ).toEqual({
+      allowed: false,
+      reason: "approval_required",
+    });
+  });
+
+  it.each(["pending", "rejected", "expired"] as const)(
+    "requires approved status before leaving the approval gate: %s",
+    (approvalStatus) => {
+      expect(
+        attemptIncidentTransition({
+          current: "awaiting_approval",
+          next: "executing",
+          context: {
+            ...freshExecutionStartContext(),
+            executionMode: "approval_required",
+            approvalStatus,
+          },
+        }),
+      ).toEqual({
+        allowed: false,
+        reason: "approval_required",
+      });
+    },
+  );
+
+  it("allows the exact approved recovery to enter executing", () => {
+    expect(
+      attemptIncidentTransition({
+        current: "awaiting_approval",
+        next: "executing",
+        context: approvedExecutionStartContext(),
+      }),
+    ).toEqual({ allowed: true, next: "executing" });
+  });
+});
+
+describe("approval contract", () => {
+  it("exports the exact bounded mode and status values", () => {
+    expect(EXECUTION_MODES).toEqual(["autonomous", "approval_required"]);
+    expect(APPROVAL_STATUSES).toEqual([
+      "pending",
+      "approved",
+      "rejected",
+      "expired",
+    ]);
+
+    const mode: ExecutionMode = "approval_required";
+    const status: ApprovalStatus = "approved";
+    expect({ mode, status }).toEqual({
+      mode: "approval_required",
+      status: "approved",
+    });
+  });
+
+  it.each(["rejected", "expired"] as const)(
+    "allows %s approval to end as needs_human",
+    (approvalStatus) => {
+      expect(
+        attemptIncidentTransition({
+          current: "awaiting_approval",
+          next: "needs_human",
+          context: {
+            executionMode: "approval_required",
+            approvalStatus,
+          },
+        }),
+      ).toEqual({ allowed: true, next: "needs_human" });
+    },
+  );
+
+  it("does not let pending approval terminate or execute", () => {
+    for (const next of ["needs_human", "executing"] as const) {
+      expect(
+        attemptIncidentTransition({
+          current: "awaiting_approval",
+          next,
+          context: {
+            ...freshExecutionStartContext(),
+            executionMode: "approval_required",
+            approvalStatus: "pending",
+          },
+        }),
+      ).toEqual({
+        allowed: false,
+        reason: "approval_required",
+      });
+    }
   });
 });
 

@@ -1,6 +1,6 @@
 import "server-only";
 
-import { fetchMutation } from "convex/nextjs";
+import { fetchMutation, fetchQuery } from "convex/nextjs";
 
 import { api } from "../../../convex/_generated/api";
 
@@ -15,6 +15,24 @@ type RequestDemoRunResult =
         | "environment_recovery_pending"
         | "disabled";
     };
+
+export type DemoApprovalSession = {
+  demoCommandId: string;
+  incidentId: string;
+  status: "pending" | "approved" | "rejected" | "expired";
+  expiresAt: number;
+  decidedAt: number | null;
+};
+
+export type DemoApprovalDecisionResult =
+  | {
+      demoCommandId: string;
+      incidentId: string;
+      recoveryCommandId: string;
+      status: "approved" | "rejected";
+      decidedAt: number;
+    }
+  | { status: "unavailable" | "runner_offline" };
 
 function requiredServerEnvironment(name: "CONVEX_URL") {
   const value = process.env[name];
@@ -37,13 +55,26 @@ function convexErrorCode(error: unknown) {
 
 export async function requestDemoRun(args: {
   requestSecret: string;
+  executionMode?: "autonomous" | "approval_required";
+  approvalCapabilityDigest?: string;
 }): Promise<RequestDemoRunResult> {
   const url = requiredServerEnvironment("CONVEX_URL");
 
   try {
     const result = await fetchMutation(
       api.demo.requestRun,
-      { requestSecret: args.requestSecret },
+      args.executionMode === undefined
+        ? { requestSecret: args.requestSecret }
+        : {
+            requestSecret: args.requestSecret,
+            executionMode: args.executionMode,
+            ...(args.approvalCapabilityDigest === undefined
+              ? {}
+              : {
+                  approvalCapabilityDigest:
+                    args.approvalCapabilityDigest,
+                }),
+          },
       { url },
     );
     return { status: "accepted", demoCommandId: result.demoCommandId };
@@ -61,6 +92,51 @@ export async function requestDemoRun(args: {
         return { status: "environment_recovery_pending" };
       case "DEMO_DISABLED":
         return { status: "disabled" };
+      default:
+        throw error;
+    }
+  }
+}
+
+export async function getDemoApprovalSession(args: {
+  requestSecret: string;
+  approvalCapabilityDigest: string;
+}): Promise<DemoApprovalSession | null> {
+  const url = requiredServerEnvironment("CONVEX_URL");
+  return await fetchQuery(
+    api.demo.getApprovalSession,
+    {
+      requestSecret: args.requestSecret,
+      approvalCapabilityDigest: args.approvalCapabilityDigest,
+    },
+    { url },
+  );
+}
+
+export async function decideDemoApproval(args: {
+  requestSecret: string;
+  approvalCapabilityDigest: string;
+  decision: "approved" | "rejected";
+}): Promise<DemoApprovalDecisionResult> {
+  const url = requiredServerEnvironment("CONVEX_URL");
+  try {
+    return await fetchMutation(
+      api.demo.decideApproval,
+      {
+        requestSecret: args.requestSecret,
+        approvalCapabilityDigest: args.approvalCapabilityDigest,
+        decision: args.decision,
+      },
+      { url },
+    );
+  } catch (error) {
+    switch (convexErrorCode(error)) {
+      case "APPROVAL_NOT_FOUND":
+      case "APPROVAL_NOT_PENDING":
+      case "APPROVAL_EXPIRED":
+        return { status: "unavailable" };
+      case "RUNNER_OFFLINE":
+        return { status: "runner_offline" };
       default:
         throw error;
     }

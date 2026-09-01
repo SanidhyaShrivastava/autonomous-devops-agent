@@ -7,6 +7,12 @@ import { useEffect, useState, useTransition } from "react";
 
 import { api } from "../../convex/_generated/api";
 import type { Id } from "../../convex/_generated/dataModel";
+import {
+  ApprovalGate,
+  type ApprovalDecisionNotice,
+  type ApprovalSessionStatus,
+  type PublicApproval,
+} from "./approval-gate";
 import { IncidentTimeline } from "./incident-timeline";
 import { ResolutionCard } from "./resolution-card";
 
@@ -15,6 +21,7 @@ const PHASE_LABELS: Record<string, string> = {
   investigating: "Investigating evidence",
   manager_review: "Manager reviewing evidence",
   policy_check: "Checking recovery policy",
+  awaiting_approval: "Waiting for browser approval",
   executing: "Executing policy-checked recovery",
   verifying: "Verifying fresh health",
   resolved: "Recovered successfully",
@@ -28,11 +35,26 @@ const ACTIVE_RUN_REFRESH_MS = 1_000;
 const ACTIVE_RUN_REFRESH_LIMIT_MS = 90_000;
 const TERMINAL_COMMAND_STATUSES = new Set(["complete", "failed", "expired"]);
 
-type PublicDemoState = FunctionReturnType<typeof api.demo.getPublicState>;
+type ExecutionMode = "autonomous" | "approval_required";
+
+type PublicDemoState = FunctionReturnType<typeof api.demo.getPublicState> & {
+  executionMode: ExecutionMode;
+  approval: PublicApproval | null;
+};
 
 type TrackedRun = {
   demoCommandId: Id<"demoCommands">;
   refreshDeadline: number;
+  executionMode: ExecutionMode;
+};
+
+type ScopedApprovalSession = {
+  key: string;
+  status: ApprovalSessionStatus;
+};
+
+type ScopedApprovalDecisionNotice = ApprovalDecisionNotice & {
+  key: string;
 };
 
 const convexUrl = process.env.NEXT_PUBLIC_CONVEX_URL;
@@ -82,6 +104,7 @@ function freshestState(
 function acceptedRunPlaceholder(
   latestState: PublicDemoState | undefined,
   demoCommandId: Id<"demoCommands">,
+  executionMode: ExecutionMode,
 ): PublicDemoState | undefined {
   if (!latestState) {
     return undefined;
@@ -89,6 +112,8 @@ function acceptedRunPlaceholder(
   return {
     ...latestState,
     demoCommandId,
+    executionMode,
+    approval: null,
     commandStatus: "queued",
     commandExpiresAt: null,
     active: true,
@@ -201,6 +226,32 @@ function recoveryRailOutcome(phase: string | null | undefined) {
   }
 }
 
+function approvalRailState(
+  executionMode: ExecutionMode | null | undefined,
+  approval: PublicApproval | null | undefined,
+) {
+  if (executionMode !== "approval_required") {
+    return { className: "rail-pending", label: "Automatic path" };
+  }
+
+  switch (approval?.status) {
+    case "pending":
+      return {
+        className: "rail-warning",
+        label: "Approval needed",
+        current: true,
+      };
+    case "approved":
+      return { className: "rail-active", label: "Approved" };
+    case "rejected":
+      return { className: "rail-warning", label: "Rejected" };
+    case "expired":
+      return { className: "rail-warning", label: "Expired" };
+    default:
+      return { className: "rail-pending", label: "Approval pending" };
+  }
+}
+
 function resetFailureMessage(status: number) {
   switch (status) {
     case 409:
@@ -215,14 +266,17 @@ function resetFailureMessage(status: number) {
 }
 
 export function DemoDashboard() {
-  const latestState = useQuery(api.demo.getPublicState, {});
+  const latestState = useQuery(
+    api.demo.getPublicState,
+    {},
+  ) as PublicDemoState | undefined;
   const [trackedRun, setTrackedRun] = useState<TrackedRun | null>(null);
   const trackedDemoCommandId = trackedRun?.demoCommandId ?? null;
   const trackedRefreshDeadline = trackedRun?.refreshDeadline ?? 0;
   const subscribedRunState = useQuery(
     api.demo.getPublicState,
     trackedDemoCommandId ? { demoCommandId: trackedDemoCommandId } : "skip",
-  );
+  ) as PublicDemoState | undefined;
   const [polledRunState, setPolledRunState] = useState<PublicDemoState | null>(
     null,
   );
@@ -232,12 +286,22 @@ export function DemoDashboard() {
   );
   const state = trackedDemoCommandId
     ? (trackedRunState ??
-      acceptedRunPlaceholder(latestState, trackedDemoCommandId))
+      acceptedRunPlaceholder(
+        latestState,
+        trackedDemoCommandId,
+        trackedRun?.executionMode ?? "autonomous",
+      ))
     : latestState;
   const [requestNotice, setRequestNotice] = useState<{
     message: string;
     stateKey: string;
   } | null>(null);
+  const [startingMode, setStartingMode] = useState<ExecutionMode | null>(null);
+  const [approvalSession, setApprovalSession] =
+    useState<ScopedApprovalSession | null>(null);
+  const [approvalSessionRetryCount, setApprovalSessionRetryCount] = useState(0);
+  const [approvalDecisionNotice, setApprovalDecisionNotice] =
+    useState<ScopedApprovalDecisionNotice | null>(null);
   const [isStarting, startReset] = useTransition();
   const cooldownRemainingMs = useCooldownRemaining(
     state?.cooldownUntil,
@@ -255,6 +319,18 @@ export function DemoDashboard() {
   const stateKey = state
     ? `${state.demoCommandId ?? "none"}:${state.active}:${state.incident?.incidentId ?? "none"}:${state.incident?.currentPhase ?? "none"}:${state.steps.length}`
     : "loading";
+  const pendingApprovalKey =
+    state?.demoCommandId && state.approval?.status === "pending"
+      ? `${state.demoCommandId}:${state.approval.requestedAt}`
+      : null;
+  const approvalSessionStatus: ApprovalSessionStatus =
+    pendingApprovalKey && approvalSession?.key === pendingApprovalKey
+      ? approvalSession.status
+      : "checking";
+  const visibleApprovalDecisionNotice =
+    pendingApprovalKey && approvalDecisionNotice?.key === pendingApprovalKey
+      ? approvalDecisionNotice
+      : null;
 
   useEffect(() => {
     if (
@@ -305,8 +381,52 @@ export function DemoDashboard() {
     };
   }, [trackedDemoCommandId, trackedRefreshDeadline, trackedRunTerminal]);
 
+  useEffect(() => {
+    if (!pendingApprovalKey) {
+      return;
+    }
+
+    let disposed = false;
+
+    void fetch("/api/demo/approval/session", { method: "GET" })
+      .then(async (response) => {
+        if (!response.ok) {
+          throw new Error("Approval session unavailable");
+        }
+        const payload = (await response.json()) as { canDecide?: unknown };
+        if (typeof payload.canDecide !== "boolean") {
+          throw new Error("Approval session response was invalid");
+        }
+        if (!disposed) {
+          setApprovalSession({
+            key: pendingApprovalKey,
+            status: payload.canDecide ? "can_decide" : "spectator",
+          });
+        }
+      })
+      .catch(() => {
+        if (!disposed) {
+          setApprovalSession({
+            key: pendingApprovalKey,
+            status: "unavailable",
+          });
+        }
+      });
+
+    return () => {
+      disposed = true;
+    };
+  }, [pendingApprovalKey, approvalSessionRetryCount]);
+
   const phaseLabel = !state
     ? "Loading live recovery state"
+    : state.approval?.status === "rejected"
+      ? "Staged restart rejected"
+      : state.approval?.status === "expired"
+        ? "Approval window expired"
+        : state.approval?.status === "approved" &&
+            state.incident?.currentPhase === "awaiting_approval"
+          ? "Approval recorded"
     : state.incident
       ? (PHASE_LABELS[state.incident.currentPhase] ?? "Incident in progress")
       : !state.enabled
@@ -341,13 +461,18 @@ export function DemoDashboard() {
     disabledReason = `The recovery demo is unavailable for ${Math.ceil(cooldownRemainingMs / 1_000)} more seconds.`;
   }
 
-  const requestReset = () => {
+  const requestReset = (executionMode: ExecutionMode) => {
     setRequestNotice(null);
+    setStartingMode(executionMode);
     const requestStateKey = stateKey;
     startReset(async () => {
       let requestWasAccepted = false;
       try {
-        const response = await fetch("/api/demo/reset", { method: "POST" });
+        const route =
+          executionMode === "approval_required"
+            ? "/api/demo/reset/approval-required"
+            : "/api/demo/reset";
+        const response = await fetch(route, { method: "POST" });
         if (!response.ok) {
           setRequestNotice({
             message: resetFailureMessage(response.status),
@@ -365,13 +490,17 @@ export function DemoDashboard() {
         }
 
         setRequestNotice({
-          message: "Recovery demo started. Waiting for the runner.",
+          message:
+            executionMode === "approval_required"
+              ? "Approval demo started. Waiting for the runner."
+              : "Recovery demo started. Waiting for the runner.",
           stateKey: requestStateKey,
         });
         setPolledRunState(null);
         setTrackedRun({
           demoCommandId: payload.demoCommandId as Id<"demoCommands">,
           refreshDeadline: Date.now() + ACTIVE_RUN_REFRESH_LIMIT_MS,
+          executionMode,
         });
       } catch {
         setRequestNotice({
@@ -380,8 +509,73 @@ export function DemoDashboard() {
             : "The demo could not start. No action was taken.",
           stateKey: requestStateKey,
         });
+      } finally {
+        setStartingMode(null);
       }
     });
+  };
+
+  const submitApprovalDecision = (decision: "approve" | "reject") => {
+    if (
+      !pendingApprovalKey ||
+      state?.approval?.status !== "pending" ||
+      visibleApprovalDecisionNotice?.status === "submitting" ||
+      visibleApprovalDecisionNotice?.status === "accepted"
+    ) {
+      return;
+    }
+
+    const submittingMessage =
+      decision === "approve"
+        ? "Recording approval. No recovery action has run yet."
+        : "Recording rejection. No recovery action will be authorized.";
+    setApprovalDecisionNotice({
+      key: pendingApprovalKey,
+      decision,
+      status: "submitting",
+      message: submittingMessage,
+    });
+
+    const route =
+      decision === "approve"
+        ? "/api/demo/approval/approve"
+        : "/api/demo/approval/reject";
+    void fetch(route, { method: "POST" })
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error("Approval decision was rejected");
+        }
+        setApprovalDecisionNotice({
+          key: pendingApprovalKey,
+          decision,
+          status: "accepted",
+          message:
+            decision === "approve"
+              ? "Approval recorded. The Linux runner can resume the staged restart."
+              : "Rejection recorded. No recovery action was authorized.",
+        });
+      })
+      .catch(() => {
+        setApprovalDecisionNotice({
+          key: pendingApprovalKey,
+          decision,
+          status: "error",
+          message:
+            "The decision could not be recorded. No recovery action was authorized.",
+        });
+      });
+  };
+
+  const retryApprovalSession = () => {
+    if (!pendingApprovalKey) {
+      return;
+    }
+
+    setApprovalSession({
+      key: pendingApprovalKey,
+      status: "checking",
+    });
+    setApprovalSessionRetryCount((count) => count + 1);
   };
 
   const runnerLabel = runnerOnline ? "Runner online" : "Runner offline";
@@ -389,6 +583,8 @@ export function DemoDashboard() {
     ? "Service unknown"
     : !runnerOnline
       ? "Service unavailable"
+      : state.incident?.currentPhase === "awaiting_approval"
+        ? "Service stopped"
       : recoveryStatus === "restored"
         ? "Service healthy"
         : recoveryStatus === "pending" || recoveryStatus === "restoring"
@@ -408,6 +604,8 @@ export function DemoDashboard() {
   const serviceBadgeClass =
     !runnerOnline
       ? "badge-neutral"
+      : state?.incident?.currentPhase === "awaiting_approval"
+        ? "badge-offline"
       : recoveryStatus === "restored"
         ? "badge-online"
         : recoveryStatus === "pending" || recoveryStatus === "restoring"
@@ -421,6 +619,15 @@ export function DemoDashboard() {
     ? "Connecting to the public incident state"
     : !state.enabled
       ? "An operator must enable the public demo"
+      : state.approval?.status === "rejected"
+        ? "No recovery action was authorized"
+        : state.approval?.status === "expired"
+          ? "The approval closed without authorizing the restart"
+          : state.approval?.status === "approved" &&
+              state.incident?.currentPhase === "awaiting_approval"
+            ? "Waiting for the Linux runner to resume the fixed action"
+      : state.approval?.status === "pending"
+        ? "The fixed service remains stopped; no recovery action has run"
       : state.active
         ? "Recovery evidence is streaming below"
         : didCommandFailBeforeIncident(state)
@@ -431,6 +638,10 @@ export function DemoDashboard() {
               ? "Latest recorded incident"
               : "Standing by for one isolated failure";
   const railOutcome = recoveryRailOutcome(state?.incident?.currentPhase);
+  const railApproval = approvalRailState(
+    state?.executionMode,
+    state?.approval,
+  );
   const liveAnnouncement =
     requestNotice?.stateKey === stateKey ? requestNotice.message : phaseLabel;
 
@@ -447,22 +658,24 @@ export function DemoDashboard() {
 
           <div className="headline-block">
             <p className="section-kicker">
-              One service · one safe recovery path
+              One service · two controlled recovery modes
             </p>
             <h1>
-              Recover one failed Linux service safely in about 20 seconds.
+              Recover one failed Linux service automatically—or pause before
+              the restart.
             </h1>
             <p className="headline-summary">
-              Watch the agent investigate the failure, pass an allowlist policy
-              check, restart the disposable service, and verify fresh health.
+              Choose the existing autonomous path or wait for the agent to pass
+              an allowlist policy check before asking this browser to decide.
+              Both modes use the same fixed restart and verify fresh health.
             </p>
           </div>
 
           <p className="safety-line">
             <span aria-hidden="true">◆</span>
-            Disposable demo container · allowlisted and policy-checked restart ·
-            no arbitrary shell access · no human approval step in this staged
-            demo
+            This public demo has no user account and does not identify an
+            approver · approval applies only to one disposable service · no
+            arbitrary shell access
           </p>
         </div>
 
@@ -476,22 +689,48 @@ export function DemoDashboard() {
               <span className="status-dot" aria-hidden="true" />
               {serviceLabel}
             </span>
+            {state?.approval?.status === "pending" ? (
+              <span className="system-badge badge-warning">
+                <span className="status-dot" aria-hidden="true" />
+                Approval needed
+              </span>
+            ) : null}
           </div>
 
-          <button
-            className="reset-button"
-            type="button"
-            onClick={requestReset}
-            disabled={disabledReason !== null}
-            aria-describedby="reset-assistance"
-          >
-            <span>{isStarting ? "Starting…" : "Run recovery demo"}</span>
-            <span aria-hidden="true">↗</span>
-          </button>
+          <div className="demo-mode-actions">
+            <button
+              className="reset-button"
+              type="button"
+              onClick={() => requestReset("autonomous")}
+              disabled={disabledReason !== null}
+              aria-describedby="reset-assistance"
+            >
+              <span>
+                {isStarting && startingMode === "autonomous"
+                  ? "Starting…"
+                  : "Run autonomous demo"}
+              </span>
+              <span aria-hidden="true">↗</span>
+            </button>
+            <button
+              className="reset-button reset-button-approval"
+              type="button"
+              onClick={() => requestReset("approval_required")}
+              disabled={disabledReason !== null}
+              aria-describedby="reset-assistance"
+            >
+              <span>
+                {isStarting && startingMode === "approval_required"
+                  ? "Starting…"
+                  : "Run approval demo"}
+              </span>
+              <span aria-hidden="true">→</span>
+            </button>
+          </div>
 
           <p id="reset-assistance" className="reset-assistance">
             {disabledReason ??
-              "Stops only the disposable service and starts one measured recovery run."}
+              "Autonomous continues after policy. Approval pauses before the same fixed restart."}
           </p>
 
           <div className="phase-readout">
@@ -525,6 +764,13 @@ export function DemoDashboard() {
         <span aria-hidden="true">→</span>
         <span>Policy</span>
         <span aria-hidden="true">→</span>
+        <span
+          className={`rail-state ${railApproval.className}`}
+          aria-current={railApproval.current ? "step" : undefined}
+        >
+          {railApproval.label}
+        </span>
+        <span aria-hidden="true">→</span>
         <span>Recovery</span>
         <span aria-hidden="true">→</span>
         <span className={`rail-state ${railOutcome.className}`}>
@@ -533,11 +779,27 @@ export function DemoDashboard() {
       </div>
 
       <div className="evidence-layout">
+        {state?.approval ? (
+          <ApprovalGate
+            approval={state.approval}
+            incidentPhase={state.incident?.currentPhase ?? null}
+            environmentRecoveryStatus={
+              state.incident?.environmentRecoveryStatus ?? null
+            }
+            sessionStatus={approvalSessionStatus}
+            runnerOnline={runnerOnline}
+            decisionNotice={visibleApprovalDecisionNotice}
+            onDecision={submitApprovalDecision}
+            onRetrySession={retryApprovalSession}
+          />
+        ) : null}
         <ResolutionCard
           incident={state?.incident ?? null}
           result={state?.result ?? null}
           steps={state?.steps ?? []}
           runnerOnline={runnerOnline}
+          executionMode={state?.executionMode ?? "autonomous"}
+          approval={state?.approval ?? null}
         />
         <IncidentTimeline steps={state?.steps ?? []} />
       </div>

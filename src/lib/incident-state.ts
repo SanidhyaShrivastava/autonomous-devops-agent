@@ -1,9 +1,11 @@
 import { z } from "zod";
 
 import {
+  ApprovalStatusSchema,
   DEMO_ACTION_ID,
   DEMO_HEALTHY_STATUS,
   DEMO_SERVICE_IDENTITY,
+  ExecutionModeSchema,
   INCIDENT_TERMINAL_STATES,
   IncidentStateSchema,
   type IncidentState,
@@ -41,6 +43,8 @@ const IncidentTransitionContextSchema = z
     execution: RecoveryExecutionSchema.optional(),
     verification: HealthVerificationSchema.optional(),
     previousExecutionIds: z.array(ExecutionIdSchema).max(100).optional(),
+    executionMode: ExecutionModeSchema.optional(),
+    approvalStatus: ApprovalStatusSchema.optional(),
   })
   .strict();
 
@@ -68,6 +72,7 @@ export type IncidentTransitionDenialReason =
   | "fresh_verification_required"
   | "execution_ledger_required"
   | "duplicate_execution"
+  | "approval_required"
   | "verification_contract_failed";
 
 export type IncidentTransitionResult =
@@ -89,7 +94,8 @@ const ALLOWED_NEXT_STATES: Readonly<
     "investigation_failed",
   ],
   manager_review: ["policy_check", "needs_human"],
-  policy_check: ["executing", "needs_human"],
+  policy_check: ["awaiting_approval", "executing", "needs_human"],
+  awaiting_approval: ["executing", "needs_human"],
   executing: ["verifying", "failed_recovery"],
   verifying: ["resolved", "failed_recovery"],
   resolved: [],
@@ -143,6 +149,42 @@ function validateExecutionStartContext(
   return null;
 }
 
+function approvalAllowsTransition(
+  current: IncidentState,
+  next: IncidentState,
+  context: IncidentTransitionContext | undefined,
+) {
+  const executionMode = context?.executionMode ?? "autonomous";
+
+  if (current === "policy_check" && next === "awaiting_approval") {
+    return (
+      executionMode === "approval_required" &&
+      context?.approvalStatus === "pending"
+    );
+  }
+
+  if (current === "policy_check" && next === "executing") {
+    return executionMode === "autonomous";
+  }
+
+  if (current === "awaiting_approval" && next === "executing") {
+    return (
+      executionMode === "approval_required" &&
+      context?.approvalStatus === "approved"
+    );
+  }
+
+  if (current === "awaiting_approval" && next === "needs_human") {
+    return (
+      executionMode === "approval_required" &&
+      (context?.approvalStatus === "rejected" ||
+        context?.approvalStatus === "expired")
+    );
+  }
+
+  return true;
+}
+
 export function attemptIncidentTransition(
   input: unknown,
 ): IncidentTransitionResult {
@@ -160,7 +202,14 @@ export function attemptIncidentTransition(
     return { allowed: false, reason: "invalid_transition" };
   }
 
-  if (current === "policy_check" && next === "executing") {
+  if (!approvalAllowsTransition(current, next, context)) {
+    return { allowed: false, reason: "approval_required" };
+  }
+
+  if (
+    (current === "policy_check" || current === "awaiting_approval") &&
+    next === "executing"
+  ) {
     const denial = validateExecutionStartContext(context);
     if (denial) {
       return denial;

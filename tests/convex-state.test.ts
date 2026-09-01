@@ -13,9 +13,17 @@ const OTHER_RUNNER_ID = "not-the-demo-runner";
 const CLAIM_NONCE = "stable-test-claim";
 const BASE_TIME = Date.UTC(2026, 7, 30, 12, 0, 0);
 const UTC_DAY = "2026-08-30";
+const APPROVAL_CAPABILITY_DIGEST = "a".repeat(64);
+const OTHER_APPROVAL_CAPABILITY_DIGEST = "b".repeat(64);
 
 const requestRun = makeFunctionReference<"mutation">("demo:requestRun");
 const getPublicState = makeFunctionReference<"query">("demo:getPublicState");
+const getApprovalSession = makeFunctionReference<"query">(
+  "demo:getApprovalSession",
+);
+const decideApproval = makeFunctionReference<"mutation">(
+  "demo:decideApproval",
+);
 const heartbeat = makeFunctionReference<"mutation">("runner:heartbeat");
 const getPendingDemoCommand = makeFunctionReference<"query">(
   "runner:getPendingDemoCommand",
@@ -68,6 +76,11 @@ type DemoCommandResult = {
   demoCommandId: string;
 };
 
+type RunRequestOptions = {
+  executionMode?: "autonomous" | "approval_required";
+  approvalCapabilityDigest?: string;
+};
+
 type VersionResult = {
   stateVersion: number;
   leaseExpiresAt?: number;
@@ -82,6 +95,13 @@ type IncidentResult = {
 type RecoveryResult = {
   recoveryCommandId: string;
   stateVersion: number;
+};
+
+type ApprovalRecoveryResult = RecoveryResult & {
+  status: "proposed";
+  approvalStatus: "pending";
+  approvalRequestedAt: number;
+  approvalExpiresAt: number;
 };
 
 async function expectErrorCode(
@@ -132,10 +152,14 @@ async function makeRunnerFresh(t: ConvexHarness, runnerId = RUNNER_ID) {
   return result;
 }
 
-async function createQueuedCommand(t: ConvexHarness) {
+async function createQueuedCommand(
+  t: ConvexHarness,
+  options: RunRequestOptions = {},
+) {
   await makeRunnerFresh(t);
   return (await t.mutation(requestRun, {
     requestSecret: DEMO_SECRET,
+    ...options,
   })) as DemoCommandResult;
 }
 
@@ -184,8 +208,11 @@ async function authoritativeSnapshot(t: ConvexHarness) {
   };
 }
 
-async function claimQueuedCommand(t: ConvexHarness) {
-  const { demoCommandId } = await createQueuedCommand(t);
+async function claimQueuedCommand(
+  t: ConvexHarness,
+  options: RunRequestOptions = {},
+) {
+  const { demoCommandId } = await createQueuedCommand(t, options);
   const pending = (await t.query(getPendingDemoCommand, {
     runnerToken: RUNNER_TOKEN,
     runnerId: RUNNER_ID,
@@ -204,8 +231,11 @@ async function claimQueuedCommand(t: ConvexHarness) {
   return { demoCommandId, claimed };
 }
 
-async function confirmFailure(t: ConvexHarness) {
-  const { demoCommandId, claimed } = await claimQueuedCommand(t);
+async function confirmFailure(
+  t: ConvexHarness,
+  options: RunRequestOptions = {},
+) {
+  const { demoCommandId, claimed } = await claimQueuedCommand(t, options);
   const reset = (await t.mutation(markResetApplied, {
     runnerToken: RUNNER_TOKEN,
     runnerId: RUNNER_ID,
@@ -222,8 +252,11 @@ async function confirmFailure(t: ConvexHarness) {
   return { demoCommandId, confirmed };
 }
 
-async function createDetectedIncident(t: ConvexHarness) {
-  const { demoCommandId, confirmed } = await confirmFailure(t);
+async function createDetectedIncident(
+  t: ConvexHarness,
+  options: RunRequestOptions = {},
+) {
+  const { demoCommandId, confirmed } = await confirmFailure(t, options);
   const incident = (await t.mutation(createIncidentFromConfirmedFailure, {
     runnerToken: RUNNER_TOKEN,
     runnerId: RUNNER_ID,
@@ -239,8 +272,11 @@ async function createDetectedIncident(t: ConvexHarness) {
   };
 }
 
-async function moveIncidentToInvestigating(t: ConvexHarness) {
-  const created = await createDetectedIncident(t);
+async function moveIncidentToInvestigating(
+  t: ConvexHarness,
+  options: RunRequestOptions = {},
+) {
+  const created = await createDetectedIncident(t, options);
   const investigating = (await t.mutation(updateIncidentPhase, {
     runnerToken: RUNNER_TOKEN,
     runnerId: RUNNER_ID,
@@ -336,8 +372,9 @@ async function moveIncidentToPolicyCheck(
     requiresHuman?: boolean;
     proposedActionId?: "restart_demo_service" | "no_action";
   } = {},
+  options: RunRequestOptions = {},
 ) {
-  const investigatingRun = await moveIncidentToInvestigating(t);
+  const investigatingRun = await moveIncidentToInvestigating(t, options);
   const managerReview = (await t.mutation(updateIncidentPhase, {
     runnerToken: RUNNER_TOKEN,
     runnerId: RUNNER_ID,
@@ -392,6 +429,63 @@ async function createAllowedRecovery(
   })) as RecoveryResult;
 
   return { ...ready, recovery, executionNonce };
+}
+
+async function createPendingApproval(
+  t: ConvexHarness,
+  approvalCapabilityDigest = APPROVAL_CAPABILITY_DIGEST,
+  executionNonce = "approval-required-recovery",
+) {
+  const ready = await moveIncidentToPolicyCheck(
+    t,
+    {},
+    {
+      executionMode: "approval_required",
+      approvalCapabilityDigest,
+    },
+  );
+  const recovery = (await t.mutation(createRecoveryCommand, {
+    runnerToken: RUNNER_TOKEN,
+    runnerId: RUNNER_ID,
+    demoCommandId: ready.demoCommandId,
+    incidentId: ready.incident.incidentId,
+    expectedCommandStateVersion: ready.commandStateVersion,
+    expectedIncidentPhase: "policy_check",
+    expectedIncidentStateVersion: ready.incidentStateVersion,
+    actionId: "restart_demo_service",
+    executionNonce,
+  })) as ApprovalRecoveryResult;
+  await t.mutation(appendStep, {
+    runnerToken: RUNNER_TOKEN,
+    runnerId: RUNNER_ID,
+    demoCommandId: ready.demoCommandId,
+    incidentId: ready.incident.incidentId,
+    expectedCommandStateVersion: ready.commandStateVersion,
+    expectedIncidentStateVersion: ready.incidentStateVersion,
+    stepNonce: `approval_requested_${executionNonce}`,
+    role: "policy_gate",
+    kind: "approval_requested",
+    status: "pending",
+    safeCommandLabel: "linux agent restart fixed demo service",
+    sanitizedOutput: '{"decision":"waiting_for_starting_visitor"}',
+    startedAt: BASE_TIME,
+    costStatus: "not_reported",
+  });
+  const awaiting = (await t.mutation(updateIncidentPhase, {
+    runnerToken: RUNNER_TOKEN,
+    runnerId: RUNNER_ID,
+    demoCommandId: ready.demoCommandId,
+    incidentId: ready.incident.incidentId,
+    expectedPhase: "policy_check",
+    nextPhase: "awaiting_approval",
+    expectedStateVersion: ready.incidentStateVersion,
+    expectedCommandStateVersion: ready.commandStateVersion,
+    recoveryCommandId: recovery.recoveryCommandId,
+    expectedRecoveryStateVersion: recovery.stateVersion,
+    executionNonce,
+  })) as VersionResult;
+
+  return { ...ready, recovery, awaiting, executionNonce };
 }
 
 async function moveRecoveryToVerifying(
@@ -533,6 +627,64 @@ describe("bounded demo command creation", () => {
       dayCount: 1,
       lastRequestedAt: BASE_TIME,
     });
+  });
+
+  it("stores an explicit bounded execution mode while defaulting old callers to autonomous", async () => {
+    const automatic = createHarness();
+    await createQueuedCommand(automatic);
+    expect(await tableRows(automatic, "demoCommands")).toEqual([
+      expect.objectContaining({ executionMode: "autonomous" }),
+    ]);
+
+    const approval = createHarness();
+    await createQueuedCommand(approval, {
+      executionMode: "approval_required",
+      approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+    });
+    expect(await tableRows(approval, "demoCommands")).toEqual([
+      expect.objectContaining({
+        executionMode: "approval_required",
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      }),
+    ]);
+  });
+
+  it("requires one exact capability digest only for approval-required runs", async () => {
+    const missing = createHarness();
+    await makeRunnerFresh(missing);
+    await expectErrorCode(
+      missing.mutation(requestRun, {
+        requestSecret: DEMO_SECRET,
+        executionMode: "approval_required",
+      }),
+      "APPROVAL_CAPABILITY_REQUIRED",
+    );
+
+    const malformed = createHarness();
+    await makeRunnerFresh(malformed);
+    await expectErrorCode(
+      malformed.mutation(requestRun, {
+        requestSecret: DEMO_SECRET,
+        executionMode: "approval_required",
+        approvalCapabilityDigest: "not-a-sha256-digest",
+      }),
+      "INVALID_APPROVAL_CAPABILITY",
+    );
+
+    const unexpected = createHarness();
+    await makeRunnerFresh(unexpected);
+    await expectErrorCode(
+      unexpected.mutation(requestRun, {
+        requestSecret: DEMO_SECRET,
+        executionMode: "autonomous",
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      }),
+      "UNEXPECTED_APPROVAL_CAPABILITY",
+    );
+
+    expect(await tableRows(missing, "demoCommands")).toHaveLength(0);
+    expect(await tableRows(malformed, "demoCommands")).toHaveLength(0);
+    expect(await tableRows(unexpected, "demoCommands")).toHaveLength(0);
   });
 
   it("serializes simultaneous requests so exactly one command wins", async () => {
@@ -909,7 +1061,7 @@ describe("runner authentication and atomic claims", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
-    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.lastRequestedAt).toBe(BASE_TIME);
     expect(control.environmentRecoveryIncidentId).toBe(incident._id);
   });
 
@@ -1085,7 +1237,7 @@ describe("runner resume, retry, and lease cleanup", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
-    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.lastRequestedAt).toBe(BASE_TIME);
 
     const [incident] = await tableRows(t, "incidents");
     expect(incident).toMatchObject({
@@ -1258,7 +1410,7 @@ describe("runner resume, retry, and lease cleanup", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
-    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.lastRequestedAt).toBe(BASE_TIME);
     expect(control.environmentRecoveryIncidentId).toBe(incident._id);
   });
 
@@ -1293,7 +1445,7 @@ describe("runner resume, retry, and lease cleanup", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
-    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.lastRequestedAt).toBe(BASE_TIME);
     expect(control.environmentRecoveryIncidentId).toBe(incident._id);
     expect(await tableRows(t, "steps")).toEqual([
       expect.objectContaining({
@@ -1427,7 +1579,7 @@ describe("cloud active-run watchdog", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
-    expect(control).not.toHaveProperty("lastRequestedAt");
+    expect(control.lastRequestedAt).toBe(BASE_TIME);
 
     const terminalSnapshot = await authoritativeSnapshot(t);
     await t.mutation(watchActiveRun, {});
@@ -1445,12 +1597,23 @@ describe("cloud active-run watchdog", () => {
     );
     expect(await tableRows(t, "demoCommands")).toHaveLength(1);
 
-    await t.run(async (ctx) => {
-      await ctx.db.patch(active.incident.incidentId as never, {
-        environmentRecoveryStatus: "restored",
-        environmentRecoveryStartedAt: BASE_TIME + 4_000,
-        environmentRecoveredAt: BASE_TIME + 4_000,
-      } as never);
+    await markEnvironmentRestoredForTest(t, active.incident.incidentId);
+    vi.setSystemTime(BASE_TIME + 59_999);
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+
+    await expectErrorCode(
+      t.mutation(requestRun, { requestSecret: DEMO_SECRET }),
+      "COOLDOWN",
+    );
+    expect(await tableRows(t, "demoCommands")).toHaveLength(1);
+
+    vi.setSystemTime(BASE_TIME + 60_000);
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
     });
     await expect(
       t.mutation(requestRun, { requestSecret: DEMO_SECRET }),
@@ -1696,6 +1859,710 @@ describe("cloud active-run watchdog", () => {
       finishedAt: BASE_TIME + 45_000,
     });
     expect(String(incident.terminalReason)).toMatch(/45-second run deadline/i);
+  });
+});
+
+describe("durable staged approval gate", () => {
+  it("reserves the human operator role for the server-side decision mutation", async () => {
+    const t = createHarness();
+    const active = await moveIncidentToInvestigating(t);
+
+    await expect(
+      t.mutation(appendStep, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        demoCommandId: active.demoCommandId,
+        incidentId: active.incident.incidentId,
+        expectedCommandStateVersion: active.commandStateVersion,
+        expectedIncidentStateVersion: active.incidentStateVersion,
+        stepNonce: "forged_human_decision",
+        role: "human_operator",
+        kind: "approval_decision",
+        status: "succeeded",
+        startedAt: BASE_TIME,
+        finishedAt: BASE_TIME,
+        latencyMs: 0,
+        costStatus: "not_reported",
+      }),
+    ).rejects.toThrow();
+    expect(await tableRows(t, "steps")).toHaveLength(0);
+  });
+
+  it("persists a proposed pending recovery and exposes only its safe public approval view", async () => {
+    const t = createHarness();
+    const pending = await createPendingApproval(t);
+
+    expect(pending.recovery).toEqual({
+      recoveryCommandId: expect.any(String),
+      stateVersion: 0,
+      status: "proposed",
+      approvalStatus: "pending",
+      approvalRequestedAt: BASE_TIME,
+      approvalExpiresAt: BASE_TIME + 300_000,
+    });
+    expect(await tableRows(t, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "proposed",
+        approvalStatus: "pending",
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        approvalRequestedAt: BASE_TIME,
+        approvalExpiresAt: BASE_TIME + 300_000,
+      }),
+    ]);
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({ currentPhase: "awaiting_approval" }),
+    ]);
+
+    await expect(
+      t.query(getApprovalSession, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      }),
+    ).resolves.toEqual({
+      demoCommandId: pending.demoCommandId,
+      incidentId: pending.incident.incidentId,
+      status: "pending",
+      expiresAt: BASE_TIME + 300_000,
+      decidedAt: null,
+    });
+
+    const publicState = (await t.query(getPublicState, {})) as Record<
+      string,
+      unknown
+    >;
+    expect(publicState).toMatchObject({
+      executionMode: "approval_required",
+      approval: {
+        status: "pending",
+        actionId: "restart_demo_service",
+        actionLabel: "linux agent restart fixed demo service",
+        requestedAt: BASE_TIME,
+        expiresAt: BASE_TIME + 300_000,
+        decidedAt: null,
+      },
+    });
+    expect(JSON.stringify(publicState)).not.toContain(
+      APPROVAL_CAPABILITY_DIGEST,
+    );
+  });
+
+  it("does not enter executing while the durable approval is pending", async () => {
+    const t = createHarness();
+    const pending = await createPendingApproval(t);
+    const before = await authoritativeSnapshot(t);
+
+    await expectErrorCode(
+      t.mutation(updateIncidentPhase, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        demoCommandId: pending.demoCommandId,
+        incidentId: pending.incident.incidentId,
+        expectedPhase: "awaiting_approval",
+        nextPhase: "executing",
+        expectedStateVersion: pending.awaiting.stateVersion,
+        expectedCommandStateVersion: pending.commandStateVersion,
+        recoveryCommandId: pending.recovery.recoveryCommandId,
+        expectedRecoveryStateVersion: pending.recovery.stateVersion,
+        executionNonce: pending.executionNonce,
+      }),
+      "APPROVAL_REQUIRED",
+    );
+    expect(await authoritativeSnapshot(t)).toEqual(before);
+  });
+
+  it("lets the capability owner approve, then lets only the runner enter executing", async () => {
+    const t = createHarness();
+    const pending = await createPendingApproval(t);
+
+    await expect(
+      t.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        decision: "approved",
+      }),
+    ).resolves.toEqual({
+      demoCommandId: pending.demoCommandId,
+      incidentId: pending.incident.incidentId,
+      recoveryCommandId: pending.recovery.recoveryCommandId,
+      status: "approved",
+      decidedAt: BASE_TIME,
+    });
+    expect(await tableRows(t, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "proposed",
+        approvalStatus: "approved",
+        approvalDecidedAt: BASE_TIME,
+        stateVersion: 1,
+      }),
+    ]);
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.role === "human_operator",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        kind: "approval_decision",
+        role: "human_operator",
+        status: "succeeded",
+        stepNonce: `approval_decision_${pending.recovery.recoveryCommandId}`,
+      }),
+    ]);
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        role: "policy_gate",
+        status: "succeeded",
+        finishedAt: BASE_TIME,
+        latencyMs: 0,
+      }),
+    ]);
+
+    await expect(
+      t.mutation(updateIncidentPhase, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        demoCommandId: pending.demoCommandId,
+        incidentId: pending.incident.incidentId,
+        expectedPhase: "awaiting_approval",
+        nextPhase: "executing",
+        expectedStateVersion: pending.awaiting.stateVersion,
+        expectedCommandStateVersion: pending.commandStateVersion,
+        recoveryCommandId: pending.recovery.recoveryCommandId,
+        expectedRecoveryStateVersion: 1,
+        executionNonce: pending.executionNonce,
+      }),
+    ).resolves.toMatchObject({
+      stateVersion: pending.awaiting.stateVersion + 1,
+      recoveryStateVersion: 2,
+    });
+    expect(await tableRows(t, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "executing",
+        approvalStatus: "approved",
+      }),
+    ]);
+  });
+
+  it("rejects missing, wrong, expired, and replayed approval authority", async () => {
+    const t = createHarness();
+    await createPendingApproval(t);
+
+    await expect(
+      t.query(getApprovalSession, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: OTHER_APPROVAL_CAPABILITY_DIGEST,
+      }),
+    ).resolves.toBeNull();
+    await expectErrorCode(
+      t.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: OTHER_APPROVAL_CAPABILITY_DIGEST,
+        decision: "approved",
+      }),
+      "APPROVAL_NOT_FOUND",
+    );
+
+    await t.mutation(decideApproval, {
+      requestSecret: DEMO_SECRET,
+      approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      decision: "approved",
+    });
+    await expectErrorCode(
+      t.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        decision: "approved",
+      }),
+      "APPROVAL_NOT_PENDING",
+    );
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.kind === "approval_decision",
+      ),
+    ).toHaveLength(1);
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toEqual([
+      expect.objectContaining({ status: "succeeded" }),
+    ]);
+
+    const expired = createHarness();
+    await createPendingApproval(expired);
+    vi.setSystemTime(BASE_TIME + 300_000);
+    await expectErrorCode(
+      expired.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        decision: "approved",
+      }),
+      "APPROVAL_EXPIRED",
+    );
+  });
+
+  it.each(["missing", "ambiguous"] as const)(
+    "fails closed when the pending approval request step is %s",
+    async (scenario) => {
+      const t = createHarness();
+      await createPendingApproval(t);
+      const [requestStep] = await tableRows(t, "steps");
+      if (!requestStep) {
+        throw new Error("Expected an approval request step");
+      }
+      await t.run(async (ctx) => {
+        if (scenario === "missing") {
+          await ctx.db.delete(requestStep._id as never);
+          return;
+        }
+        await ctx.db.insert("steps" as never, {
+          demoCommandId: requestStep.demoCommandId,
+          incidentId: requestStep.incidentId,
+          sequence: Number(requestStep.sequence) + 1,
+          stepNonce: "approval_requested_ambiguous",
+          role: "policy_gate",
+          kind: "approval_requested",
+          status: "pending",
+          safeCommandLabel: "linux agent restart fixed demo service",
+          sanitizedOutput: '{"decision":"waiting_for_starting_visitor"}',
+          startedAt: BASE_TIME,
+          costStatus: "not_reported",
+        } as never);
+      });
+
+      await expectErrorCode(
+        t.mutation(decideApproval, {
+          requestSecret: DEMO_SECRET,
+          approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+          decision: "approved",
+        }),
+        "APPROVAL_REQUEST_STEP_INVALID",
+      );
+      const [recovery] = await tableRows(t, "recoveryCommands");
+      expect(recovery).toEqual(
+        expect.objectContaining({
+          status: "proposed",
+          approvalStatus: "pending",
+        }),
+      );
+      expect(recovery).not.toHaveProperty("approvalDecidedAt");
+      expect(
+        (await tableRows(t, "steps")).filter(
+          (step) => step.kind === "approval_decision",
+        ),
+      ).toHaveLength(0);
+    },
+  );
+
+  it("requires a fresh runner for approval but permits fixed rejection while offline", async () => {
+    const approval = createHarness();
+    await createPendingApproval(approval);
+    vi.setSystemTime(BASE_TIME + 4_000);
+    await expectErrorCode(
+      approval.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        decision: "approved",
+      }),
+      "RUNNER_OFFLINE",
+    );
+
+    vi.setSystemTime(BASE_TIME);
+    const rejection = createHarness();
+    const pending = await createPendingApproval(rejection);
+    vi.setSystemTime(BASE_TIME + 4_000);
+    await expect(
+      rejection.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        decision: "rejected",
+      }),
+    ).resolves.toMatchObject({ status: "rejected" });
+    expect(await tableRows(rejection, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "blocked",
+        approvalStatus: "rejected",
+        completedAt: BASE_TIME + 4_000,
+      }),
+    ]);
+    expect(await tableRows(rejection, "incidents")).toEqual([
+      expect.objectContaining({
+        currentPhase: "needs_human",
+        status: "needs_human",
+        terminalReason: "approval_rejected",
+        environmentRecoveryStatus: "pending",
+      }),
+    ]);
+    expect(await tableRows(rejection, "demoCommands")).toEqual([
+      expect.objectContaining({ status: "complete" }),
+    ]);
+    expect(
+      (await tableRows(rejection, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        status: "blocked",
+        finishedAt: BASE_TIME + 4_000,
+        latencyMs: 4_000,
+      }),
+    ]);
+    expect(await getControl(rejection)).toMatchObject({
+      environmentRecoveryIncidentId: pending.incident.incidentId,
+    });
+    expect(await getControl(rejection)).not.toHaveProperty(
+      "activeDemoCommandId",
+    );
+    expect(await getControl(rejection)).not.toHaveProperty("activeIncidentId");
+    expect((await getControl(rejection)).lastRequestedAt).toBe(BASE_TIME);
+
+    await markEnvironmentRestoredForTest(
+      rejection,
+      pending.incident.incidentId,
+    );
+    vi.setSystemTime(BASE_TIME + 59_999);
+    await rejection.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    await expectErrorCode(
+      rejection.mutation(requestRun, { requestSecret: DEMO_SECRET }),
+      "COOLDOWN",
+    );
+
+    vi.setSystemTime(BASE_TIME + 60_000);
+    await rejection.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    await expect(
+      rejection.mutation(requestRun, { requestSecret: DEMO_SECRET }),
+    ).resolves.toMatchObject({ demoCommandId: expect.any(String) });
+  });
+
+  it("serializes simultaneous approve and reject so exactly one decision wins", async () => {
+    const t = createHarness();
+    await createPendingApproval(t);
+
+    const results = await Promise.allSettled([
+      t.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        decision: "approved",
+      }),
+      t.mutation(decideApproval, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+        decision: "rejected",
+      }),
+    ]);
+    expect(
+      results.filter((result) => result.status === "fulfilled"),
+    ).toHaveLength(1);
+    expect(
+      results.filter((result) => result.status === "rejected"),
+    ).toHaveLength(1);
+    expect(await tableRows(t, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        approvalStatus: expect.stringMatching(/^(approved|rejected)$/),
+      }),
+    ]);
+  });
+
+  it("keeps a valid pending approval alive past run deadlines while heartbeats stay fresh", async () => {
+    const t = createHarness();
+    const pending = await createPendingApproval(t);
+    vi.setSystemTime(BASE_TIME + 99_000);
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    vi.setSystemTime(BASE_TIME + 100_000);
+
+    await expect(t.mutation(watchActiveRun, {})).resolves.toMatchObject({
+      status: "awaiting_approval",
+      incidentId: pending.incident.incidentId,
+    });
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({ currentPhase: "awaiting_approval" }),
+    ]);
+    expect(await tableRows(t, "demoCommands")).toEqual([
+      expect.objectContaining({ status: "failure_confirmed" }),
+    ]);
+  });
+
+  it("fails a pending approval visibly when two runner heartbeats are missed", async () => {
+    const t = createHarness();
+    await createPendingApproval(t);
+    vi.setSystemTime(BASE_TIME + 4_000);
+
+    await expect(t.mutation(watchActiveRun, {})).resolves.toMatchObject({
+      status: "failed",
+      reason: expect.stringContaining("runner lost after step"),
+    });
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({
+        currentPhase: "investigation_failed",
+        status: "failed",
+        environmentRecoveryStatus: "pending",
+      }),
+    ]);
+    expect(await tableRows(t, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        approvalStatus: "expired",
+        approvalDecidedAt: BASE_TIME + 4_000,
+      }),
+    ]);
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        status: "blocked",
+        finishedAt: BASE_TIME + 4_000,
+        latencyMs: 4_000,
+      }),
+    ]);
+    const control = await getControl(t);
+    expect(control).not.toHaveProperty("activeDemoCommandId");
+    expect(control.lastRequestedAt).toBe(BASE_TIME);
+    await expect(
+      t.query(getApprovalSession, {
+        requestSecret: DEMO_SECRET,
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      }),
+    ).resolves.toBeNull();
+  });
+
+  it("closes a saved approval request if the runner is lost before awaiting is stored", async () => {
+    const t = createHarness();
+    const ready = await moveIncidentToPolicyCheck(
+      t,
+      {},
+      {
+        executionMode: "approval_required",
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      },
+    );
+    await t.mutation(createRecoveryCommand, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: ready.demoCommandId,
+      incidentId: ready.incident.incidentId,
+      expectedCommandStateVersion: ready.commandStateVersion,
+      expectedIncidentPhase: "policy_check",
+      expectedIncidentStateVersion: ready.incidentStateVersion,
+      actionId: "restart_demo_service",
+      executionNonce: "approval-before-awaiting",
+    });
+    await t.mutation(appendStep, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: ready.demoCommandId,
+      incidentId: ready.incident.incidentId,
+      expectedCommandStateVersion: ready.commandStateVersion,
+      expectedIncidentStateVersion: ready.incidentStateVersion,
+      stepNonce: "approval_requested_before_awaiting",
+      role: "policy_gate",
+      kind: "approval_requested",
+      status: "pending",
+      safeCommandLabel: "linux agent restart fixed demo service",
+      startedAt: BASE_TIME,
+      costStatus: "not_reported",
+    });
+    vi.setSystemTime(BASE_TIME + 4_000);
+
+    await expect(t.mutation(watchActiveRun, {})).resolves.toMatchObject({
+      status: "failed",
+      reason: expect.stringContaining("runner lost after step"),
+    });
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        status: "blocked",
+        finishedAt: BASE_TIME + 4_000,
+      }),
+    ]);
+  });
+
+  it("fails safely if the runner is lost before an approval request step is saved", async () => {
+    const t = createHarness();
+    const ready = await moveIncidentToPolicyCheck(
+      t,
+      {},
+      {
+        executionMode: "approval_required",
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      },
+    );
+    await t.mutation(createRecoveryCommand, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: ready.demoCommandId,
+      incidentId: ready.incident.incidentId,
+      expectedCommandStateVersion: ready.commandStateVersion,
+      expectedIncidentPhase: "policy_check",
+      expectedIncidentStateVersion: ready.incidentStateVersion,
+      actionId: "restart_demo_service",
+      executionNonce: "approval-before-request-step",
+    });
+    vi.setSystemTime(BASE_TIME + 4_000);
+
+    await expect(t.mutation(watchActiveRun, {})).resolves.toMatchObject({
+      status: "failed",
+      reason: expect.stringContaining("runner lost after step"),
+    });
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({
+        currentPhase: "investigation_failed",
+        status: "failed",
+        environmentRecoveryStatus: "pending",
+      }),
+    ]);
+    expect(await tableRows(t, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "failed",
+        approvalStatus: "expired",
+        approvalDecidedAt: BASE_TIME + 4_000,
+      }),
+    ]);
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toHaveLength(0);
+    expect(await getControl(t)).not.toHaveProperty("activeDemoCommandId");
+  });
+
+  it("fails closed on ambiguous pending approval requests before awaiting is stored", async () => {
+    const t = createHarness();
+    const ready = await moveIncidentToPolicyCheck(
+      t,
+      {},
+      {
+        executionMode: "approval_required",
+        approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      },
+    );
+    await t.mutation(createRecoveryCommand, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: ready.demoCommandId,
+      incidentId: ready.incident.incidentId,
+      expectedCommandStateVersion: ready.commandStateVersion,
+      expectedIncidentPhase: "policy_check",
+      expectedIncidentStateVersion: ready.incidentStateVersion,
+      actionId: "restart_demo_service",
+      executionNonce: "ambiguous-approval-before-awaiting",
+    });
+    for (const stepNonce of ["approval_request_one", "approval_request_two"]) {
+      await t.mutation(appendStep, {
+        runnerToken: RUNNER_TOKEN,
+        runnerId: RUNNER_ID,
+        demoCommandId: ready.demoCommandId,
+        incidentId: ready.incident.incidentId,
+        expectedCommandStateVersion: ready.commandStateVersion,
+        expectedIncidentStateVersion: ready.incidentStateVersion,
+        stepNonce,
+        role: "policy_gate",
+        kind: "approval_requested",
+        status: "pending",
+        safeCommandLabel: "linux agent restart fixed demo service",
+        startedAt: BASE_TIME,
+        costStatus: "not_reported",
+      });
+    }
+    vi.setSystemTime(BASE_TIME + 4_000);
+
+    await expectErrorCode(
+      t.mutation(watchActiveRun, {}),
+      "APPROVAL_REQUEST_STEP_INVALID",
+    );
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({ currentPhase: "policy_check" }),
+    ]);
+    expect(await tableRows(t, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "proposed",
+        approvalStatus: "pending",
+      }),
+    ]);
+    expect(
+      (await tableRows(t, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toHaveLength(2);
+    expect(await getControl(t)).toHaveProperty("activeDemoCommandId");
+  });
+
+  it("refreshes the waiting lease on heartbeat and expires without executing", async () => {
+    const leaseHarness = createHarness();
+    await createPendingApproval(leaseHarness);
+    vi.setSystemTime(BASE_TIME + 30_001);
+    await leaseHarness.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    expect(await tableRows(leaseHarness, "demoCommands")).toEqual([
+      expect.objectContaining({
+        status: "failure_confirmed",
+        leaseExpiresAt: BASE_TIME + 60_001,
+      }),
+    ]);
+
+    vi.setSystemTime(BASE_TIME);
+    const expiryHarness = createHarness();
+    const pending = await createPendingApproval(expiryHarness);
+    vi.setSystemTime(BASE_TIME + 299_000);
+    await expiryHarness.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    vi.setSystemTime(BASE_TIME + 300_000);
+    await expect(
+      expiryHarness.mutation(watchActiveRun, {}),
+    ).resolves.toMatchObject({
+      status: "expired",
+      incidentId: pending.incident.incidentId,
+    });
+    expect(await tableRows(expiryHarness, "recoveryCommands")).toEqual([
+      expect.objectContaining({
+        status: "blocked",
+        approvalStatus: "expired",
+      }),
+    ]);
+    expect(await tableRows(expiryHarness, "incidents")).toEqual([
+      expect.objectContaining({
+        currentPhase: "needs_human",
+        terminalReason: "approval_expired",
+        environmentRecoveryStatus: "pending",
+      }),
+    ]);
+    expect(
+      (await tableRows(expiryHarness, "steps")).filter(
+        (step) => step.kind === "approval_requested",
+      ),
+    ).toEqual([
+      expect.objectContaining({
+        status: "blocked",
+        finishedAt: BASE_TIME + 300_000,
+        latencyMs: 300_000,
+      }),
+    ]);
+    expect(await tableRows(expiryHarness, "steps")).not.toEqual(
+      expect.arrayContaining([
+        expect.objectContaining({ kind: "recovery_executed" }),
+      ]),
+    );
+    expect((await getControl(expiryHarness)).lastRequestedAt).toBe(BASE_TIME);
   });
 });
 
@@ -2480,6 +3347,7 @@ describe("recovery state and completion", () => {
       const control = await getControl(t);
       expect(control).not.toHaveProperty("activeDemoCommandId");
       expect(control).not.toHaveProperty("activeIncidentId");
+      expect(control.lastRequestedAt).toBe(BASE_TIME);
     },
   );
 
@@ -2531,6 +3399,7 @@ describe("recovery state and completion", () => {
     const control = await getControl(t);
     expect(control).not.toHaveProperty("activeDemoCommandId");
     expect(control).not.toHaveProperty("activeIncidentId");
+    expect(control.lastRequestedAt).toBe(BASE_TIME);
   });
 
   it("validates command and recovery versions on execution and completion", async () => {

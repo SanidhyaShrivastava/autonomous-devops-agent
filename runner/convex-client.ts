@@ -59,6 +59,13 @@ export function parseRecoveryLabel(value: unknown): RecoveryCommandLabel {
 }
 
 const ActionIdSchema = z.enum(["restart_demo_service", "no_action"]);
+const ExecutionModeSchema = z.enum(["autonomous", "approval_required"]);
+const ApprovalStatusSchema = z.enum([
+  "pending",
+  "approved",
+  "rejected",
+  "expired",
+]);
 const IdentifierSchema = z.string().min(1).max(128);
 
 const EnvironmentRecoveryRequestSchema = z
@@ -95,6 +102,7 @@ const ActiveDemoCommandSchema = z
     claimedAt: z.number().finite().nonnegative().nullable(),
     leaseExpiresAt: z.number().finite().nonnegative().nullable(),
     stateVersion: z.number().int().nonnegative(),
+    executionMode: ExecutionModeSchema.optional(),
     incidentId: IdentifierSchema.nullable(),
     incident: z
       .object({
@@ -128,6 +136,10 @@ const ActiveDemoCommandSchema = z
           })
           .strict()
           .nullable(),
+        approvalStatus: ApprovalStatusSchema.nullable().optional(),
+        approvalRequestedAt: z.number().finite().nonnegative().nullable().optional(),
+        approvalExpiresAt: z.number().finite().nonnegative().nullable().optional(),
+        approvalDecidedAt: z.number().finite().nonnegative().nullable().optional(),
       })
       .strict()
       .nullable(),
@@ -240,6 +252,7 @@ function mapCommand(rawCommand: unknown): RecoveryCommandSnapshot | null {
     expiresAt: command.expiresAt,
     leaseExpiresAt: command.leaseExpiresAt,
     stateVersion: command.stateVersion,
+    executionMode: command.executionMode ?? "autonomous",
     incident: command.incident
       ? {
           id: command.incident._id,
@@ -263,6 +276,10 @@ function mapCommand(rawCommand: unknown): RecoveryCommandSnapshot | null {
           executionNonce: command.recovery.executionNonce,
           completedAt: command.recovery.completedAt,
           executionEvidence: command.recovery.executionEvidence,
+          approvalStatus: command.recovery.approvalStatus ?? null,
+          approvalRequestedAt: command.recovery.approvalRequestedAt ?? null,
+          approvalExpiresAt: command.recovery.approvalExpiresAt ?? null,
+          approvalDecidedAt: command.recovery.approvalDecidedAt ?? null,
         }
       : null,
     stepNonces: command.stepNonces,

@@ -10,6 +10,7 @@ const ROLE_LABELS: Record<PublicStep["role"], string> = {
   investigator: "Investigator",
   recovery_planner: "Recovery Planner",
   policy_gate: "Policy Gate",
+  human_operator: "Human Operator",
   executor: "Executor",
   verifier: "Verifier",
 };
@@ -24,6 +25,11 @@ const ACTION_LABELS: Record<string, string> = {
   diagnosis_completed: "Produced an evidence-backed diagnosis",
   manager_evidence_review: "Reviewed evidence and selected the next step",
   policy_decision: "Checked the action against the safety policy",
+  approval_requested: "Paused before the fixed restart for browser approval",
+  approval_decision: "Recorded the browser decision for the staged restart",
+  approval_approved: "Recorded approval for the fixed service restart",
+  approval_rejected: "Recorded rejection of the fixed service restart",
+  approval_expired: "Closed the approval window without a decision",
   recovery_failed: "Attempted the allowlisted, policy-checked recovery action",
   recovery_executed: "Executed the allowlisted, policy-checked recovery action",
   verification_completed: "Ran a fresh service health check",
@@ -66,12 +72,19 @@ function formatLatency(latencyMs: number | null) {
 function TimelineStep({ step }: { step: PublicStep }) {
   const action = ACTION_LABELS[step.kind] ?? humanize(step.kind);
   const status = STATUS_LABELS[step.status];
+  const operationLabel =
+    step.kind === "approval_requested" ? "Proposed action" : "Operation";
 
   return (
     <li
       className="trace-step"
       data-step-status={step.status}
-      aria-current={step.status === "running" ? "step" : undefined}
+      aria-current={
+        step.status === "running" ||
+        (step.kind === "approval_requested" && step.status === "pending")
+          ? "step"
+          : undefined
+      }
     >
       <div className="trace-marker" aria-hidden="true">
         <span>{String(step.sequence).padStart(2, "0")}</span>
@@ -94,7 +107,7 @@ function TimelineStep({ step }: { step: PublicStep }) {
 
         {step.safeCommandLabel ? (
           <div className="operation-line">
-            <span className="operation-label">Operation</span>
+            <span className="operation-label">{operationLabel}</span>
             <code>{step.safeCommandLabel}</code>
           </div>
         ) : null}
@@ -147,7 +160,7 @@ export function IncidentTimeline({ steps }: { steps: PublicStep[] }) {
           <div>
             <h3>No incident steps yet</h3>
             <p>
-              Run the recovery demo to watch each recorded recovery step appear
+              Run either demo mode to watch each recorded recovery step appear
               here.
             </p>
           </div>

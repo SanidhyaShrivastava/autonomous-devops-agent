@@ -11,11 +11,24 @@ const demoCommandStatus = v.union(
   v.literal("failed"),
 );
 
+const executionMode = v.union(
+  v.literal("autonomous"),
+  v.literal("approval_required"),
+);
+
+const approvalStatus = v.union(
+  v.literal("pending"),
+  v.literal("approved"),
+  v.literal("rejected"),
+  v.literal("expired"),
+);
+
 const incidentPhase = v.union(
   v.literal("failed_detected"),
   v.literal("investigating"),
   v.literal("manager_review"),
   v.literal("policy_check"),
+  v.literal("awaiting_approval"),
   v.literal("executing"),
   v.literal("verifying"),
   v.literal("resolved"),
@@ -51,6 +64,7 @@ const agentRole = v.union(
   v.literal("investigator"),
   v.literal("recovery_planner"),
   v.literal("policy_gate"),
+  v.literal("human_operator"),
   v.literal("executor"),
   v.literal("verifier"),
 );
@@ -99,9 +113,12 @@ export default defineSchema({
     leaseExpiresAt: v.optional(v.number()),
     stateVersion: v.number(),
     idempotencyKey: v.string(),
+    executionMode: v.optional(executionMode),
+    approvalCapabilityDigest: v.optional(v.string()),
   })
     .index("by_status_created_at", ["status", "createdAt"])
-    .index("by_created_at", ["createdAt"]),
+    .index("by_created_at", ["createdAt"])
+    .index("by_approval_capability_digest", ["approvalCapabilityDigest"]),
 
   incidents: defineTable({
     demoCommandId: v.id("demoCommands"),
@@ -156,9 +173,15 @@ export default defineSchema({
     runnerId: v.string(),
     stateVersion: v.number(),
     executionNonce: v.string(),
+    approvalStatus: v.optional(approvalStatus),
+    approvalCapabilityDigest: v.optional(v.string()),
+    approvalRequestedAt: v.optional(v.number()),
+    approvalExpiresAt: v.optional(v.number()),
+    approvalDecidedAt: v.optional(v.number()),
   })
     .index("by_incident", ["incidentId"])
-    .index("by_execution_nonce", ["executionNonce"]),
+    .index("by_execution_nonce", ["executionNonce"])
+    .index("by_approval_capability_digest", ["approvalCapabilityDigest"]),
 
   steps: defineTable({
     demoCommandId: v.id("demoCommands"),

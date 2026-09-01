@@ -5,6 +5,7 @@ export const INCIDENT_ACTIVE_PHASES = [
   "investigating",
   "manager_review",
   "policy_check",
+  "awaiting_approval",
   "executing",
   "verifying",
 ] as const;
@@ -26,6 +27,7 @@ export const AGENT_ROLES = [
   "investigator",
   "recovery_planner",
   "policy_gate",
+  "human_operator",
   "executor",
   "verifier",
 ] as const;
@@ -40,6 +42,15 @@ export const DEMO_HEALTHY_STATUS = "healthy" as const;
 
 export const ACTION_IDS = [DEMO_ACTION_ID, NO_ACTION_ID] as const;
 
+export const EXECUTION_MODES = ["autonomous", "approval_required"] as const;
+
+export const APPROVAL_STATUSES = [
+  "pending",
+  "approved",
+  "rejected",
+  "expired",
+] as const;
+
 export const STEP_STATUSES = [
   "pending",
   "running",
@@ -50,6 +61,8 @@ export const STEP_STATUSES = [
 
 export const IncidentStateSchema = z.enum(INCIDENT_STATES);
 export const ActionIdSchema = z.enum(ACTION_IDS);
+export const ExecutionModeSchema = z.enum(EXECUTION_MODES);
+export const ApprovalStatusSchema = z.enum(APPROVAL_STATUSES);
 
 const BoundedEvidenceSchema = z.string().trim().min(1).max(500);
 
@@ -70,5 +83,7 @@ export type IncidentTerminalState =
 export type IncidentState = (typeof INCIDENT_STATES)[number];
 export type AgentRole = (typeof AGENT_ROLES)[number];
 export type ActionId = (typeof ACTION_IDS)[number];
+export type ExecutionMode = (typeof EXECUTION_MODES)[number];
+export type ApprovalStatus = (typeof APPROVAL_STATUSES)[number];
 export type StepStatus = (typeof STEP_STATUSES)[number];
 export type Diagnosis = z.infer<typeof DiagnosisSchema>;

@@ -45,6 +45,8 @@ function publicState(
     demoCommandId: null,
     commandStatus: null,
     commandExpiresAt: null,
+    executionMode: "autonomous",
+    approval: null,
     runnerOnline: true,
     enabled: true,
     active: false,
@@ -222,6 +224,45 @@ function runnerLossState(
   });
 }
 
+function pendingApprovalState(
+  overrides: Record<string, unknown> = {},
+) {
+  return publicState({
+    snapshotAt: BASE_TIME + 7_000,
+    demoCommandId: "command_approval",
+    commandStatus: "claimed",
+    commandExpiresAt: BASE_TIME + 90_000,
+    executionMode: "approval_required",
+    active: true,
+    incident: incident("awaiting_approval"),
+    approval: {
+      status: "pending",
+      actionId: "restart_demo_service",
+      actionLabel: "linux agent restart fixed demo service",
+      requestedAt: BASE_TIME + 6_000,
+      expiresAt: BASE_TIME + 66_000,
+      decidedAt: null,
+    },
+    steps: [
+      step(1, {
+        role: "policy_gate",
+        kind: "policy_decision",
+        sanitizedOutput: '{"allowed":true}',
+      }),
+      step(2, {
+        role: "policy_gate",
+        kind: "approval_requested",
+        status: "pending",
+        safeCommandLabel: "linux agent restart fixed demo service",
+        sanitizedOutput: null,
+        finishedAt: null,
+        latencyMs: null,
+      }),
+    ],
+    ...overrides,
+  });
+}
+
 describe("public recovery dashboard", () => {
   beforeEach(() => {
     convexMock.useQuery.mockReset();
@@ -259,7 +300,7 @@ describe("public recovery dashboard", () => {
     expect(
       screen.getByRole("status", { name: "Demo status" }),
     ).toHaveTextContent("Waiting for runner");
-    const button = screen.getByRole("button", { name: "Run recovery demo" });
+    const button = screen.getByRole("button", { name: "Run autonomous demo" });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(
       "The recovery demo is unavailable because the Linux runner is offline.",
@@ -279,7 +320,7 @@ describe("public recovery dashboard", () => {
     expect(screen.queryByText("Ready to run")).not.toBeInTheDocument();
   });
 
-  it("shows a ready state and keeps the native button keyboard focusable", () => {
+  it("offers autonomous and approval-required runs with the truthful public boundary", () => {
     convexMock.useQuery.mockReturnValue(publicState());
 
     render(<DemoDashboard />);
@@ -292,24 +333,31 @@ describe("public recovery dashboard", () => {
     expect(
       screen.getByRole("heading", {
         level: 1,
-        name: "Recover one failed Linux service safely in about 20 seconds.",
+        name: "Recover one failed Linux service automatically—or pause before the restart.",
       }),
     ).toBeInTheDocument();
     expect(
       screen.getByText(/pass an allowlist policy check/),
     ).toBeInTheDocument();
     expect(
-      screen.getByText(/no human approval step in this staged demo/i),
+      screen.getByText(/public demo has no user account/i),
     ).toBeInTheDocument();
     expect(
-      screen.queryByText(/approved recovery action/i),
-    ).not.toBeInTheDocument();
-    const button = screen.getByRole("button", { name: "Run recovery demo" });
-    button.focus();
-    expect(button).toHaveFocus();
-    expect(button).toHaveAttribute("type", "button");
-    expect(button.tabIndex).toBe(0);
-    expect(button).toBeEnabled();
+      screen.getByText(/does not identify an approver/i),
+    ).toBeInTheDocument();
+    const autonomousButton = screen.getByRole("button", {
+      name: "Run autonomous demo",
+    });
+    const approvalButton = screen.getByRole("button", {
+      name: "Run approval demo",
+    });
+    autonomousButton.focus();
+    expect(autonomousButton).toHaveFocus();
+    expect(autonomousButton).toHaveAttribute("type", "button");
+    expect(autonomousButton.tabIndex).toBe(0);
+    expect(autonomousButton).toBeEnabled();
+    expect(approvalButton).toHaveAttribute("type", "button");
+    expect(approvalButton).toBeEnabled();
     expect(screen.getByText("Verification pending")).toBeInTheDocument();
     expect(screen.queryByText("AD")).not.toBeInTheDocument();
   });
@@ -324,7 +372,7 @@ describe("public recovery dashboard", () => {
     );
 
     render(<DemoDashboard />);
-    fireEvent.click(screen.getByRole("button", { name: "Run recovery demo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run autonomous demo" }));
 
     await waitFor(() => {
       expect(fetchMock).toHaveBeenCalledWith("/api/demo/reset", {
@@ -347,7 +395,7 @@ describe("public recovery dashboard", () => {
     );
 
     const view = render(<DemoDashboard />);
-    fireEvent.click(screen.getByRole("button", { name: "Run recovery demo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run autonomous demo" }));
     expect(
       await screen.findByText("Recovery demo started. Waiting for the runner."),
     ).toBeInTheDocument();
@@ -405,7 +453,7 @@ describe("public recovery dashboard", () => {
     render(<DemoDashboard />);
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: "Run recovery demo" }),
+        screen.getByRole("button", { name: "Run autonomous demo" }),
       );
       await Promise.resolve();
     });
@@ -472,7 +520,7 @@ describe("public recovery dashboard", () => {
     render(<DemoDashboard />);
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: "Run recovery demo" }),
+        screen.getByRole("button", { name: "Run autonomous demo" }),
       );
       await Promise.resolve();
     });
@@ -512,7 +560,7 @@ describe("public recovery dashboard", () => {
     );
 
     render(<DemoDashboard />);
-    fireEvent.click(screen.getByRole("button", { name: "Run recovery demo" }));
+    fireEvent.click(screen.getByRole("button", { name: "Run autonomous demo" }));
 
     expect(
       await screen.findByText(
@@ -542,7 +590,7 @@ describe("public recovery dashboard", () => {
     render(<DemoDashboard />);
     await act(async () => {
       fireEvent.click(
-        screen.getByRole("button", { name: "Run recovery demo" }),
+        screen.getByRole("button", { name: "Run autonomous demo" }),
       );
       await Promise.resolve();
     });
@@ -572,7 +620,7 @@ describe("public recovery dashboard", () => {
     expect(
       screen.getByRole("status", { name: "Demo status" }),
     ).toHaveTextContent("Investigating evidence");
-    const button = screen.getByRole("button", { name: "Run recovery demo" });
+    const button = screen.getByRole("button", { name: "Run autonomous demo" });
     expect(button).toBeDisabled();
     expect(button).toHaveAccessibleDescription(
       "The recovery demo is unavailable while an incident is active.",
@@ -591,7 +639,7 @@ describe("public recovery dashboard", () => {
 
     expect(screen.getByText("Demo available in 13s")).toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Run recovery demo" }),
+      screen.getByRole("button", { name: "Run autonomous demo" }),
     ).toBeDisabled();
   });
 
@@ -612,7 +660,7 @@ describe("public recovery dashboard", () => {
 
     expect(convexMock.useQuery).toHaveBeenCalledTimes(callsAtExpiry);
     expect(
-      screen.getByRole("button", { name: "Run recovery demo" }),
+      screen.getByRole("button", { name: "Run autonomous demo" }),
     ).toBeEnabled();
   });
 
@@ -632,7 +680,7 @@ describe("public recovery dashboard", () => {
       "badge-neutral",
     );
     expect(
-      screen.getByRole("button", { name: "Run recovery demo" }),
+      screen.getByRole("button", { name: "Run autonomous demo" }),
     ).toBeDisabled();
   });
 
@@ -672,7 +720,7 @@ describe("public recovery dashboard", () => {
         Node.DOCUMENT_POSITION_FOLLOWING,
     ).toBeTruthy();
     expect(
-      screen.getByRole("button", { name: "Run recovery demo" }),
+      screen.getByRole("button", { name: "Run autonomous demo" }),
     ).toBeDisabled();
   });
 
@@ -710,7 +758,7 @@ describe("public recovery dashboard", () => {
     convexMock.useQuery.mockImplementation(() => currentState);
 
     const view = render(<DemoDashboard />);
-    const button = screen.getByRole("button", { name: "Run recovery demo" });
+    const button = screen.getByRole("button", { name: "Run autonomous demo" });
     expect(button).toBeDisabled();
     expect(screen.getByText("Service unavailable")).toHaveClass(
       "badge-neutral",
@@ -785,7 +833,7 @@ describe("public recovery dashboard", () => {
     );
     expect(screen.queryByText("Service healthy")).not.toBeInTheDocument();
     expect(
-      screen.getByRole("button", { name: "Run recovery demo" }),
+      screen.getByRole("button", { name: "Run autonomous demo" }),
     ).toBeDisabled();
   });
 
@@ -1073,6 +1121,465 @@ describe("public recovery dashboard", () => {
 
     expect(screen.getByText("2m 0s")).toBeInTheDocument();
     expect(screen.queryByText("1m 60s")).not.toBeInTheDocument();
+  });
+
+  it("starts the approval-required path through its fixed empty route", async () => {
+    convexMock.useQuery.mockReturnValue(publicState());
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ demoCommandId: "command_approval" }), {
+        status: 202,
+      }),
+    );
+
+    render(<DemoDashboard />);
+    fireEvent.click(
+      screen.getByRole("button", { name: "Run approval demo" }),
+    );
+
+    await waitFor(() => {
+      expect(fetchMock).toHaveBeenCalledWith(
+        "/api/demo/reset/approval-required",
+        { method: "POST" },
+      );
+    });
+    expect(
+      await screen.findByText("Approval demo started. Waiting for the runner."),
+    ).toHaveAttribute("aria-live", "polite");
+  });
+
+  it("shows the initiating browser an embedded approval checkpoint", async () => {
+    convexMock.useQuery.mockReturnValue(pendingApprovalState());
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockResolvedValue(
+      new Response(JSON.stringify({ canDecide: true }), { status: 200 }),
+    );
+
+    render(<DemoDashboard />);
+
+    const gate = await screen.findByRole("region", {
+      name: "Approve the staged restart?",
+    });
+    expect(gate).toHaveTextContent("linux agent restart fixed demo service");
+    expect(gate).toHaveTextContent(
+      "This public demo has no user account. The decision applies only to the disposable service and does not identify an approver.",
+    );
+    expect(
+      screen.getByRole("button", { name: "Approve staged restart" }),
+    ).toBeEnabled();
+    expect(
+      screen.getByRole("button", { name: "Reject and restore demo" }),
+    ).toBeEnabled();
+    expect(screen.getByText("Service stopped")).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Waiting for browser approval");
+    expect(fetchMock).toHaveBeenCalledWith("/api/demo/approval/session", {
+      method: "GET",
+    });
+  });
+
+  it("keeps spectators read-only without implying an approver identity", async () => {
+    convexMock.useQuery.mockReturnValue(pendingApprovalState());
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ canDecide: false }), { status: 200 }),
+    );
+
+    render(<DemoDashboard />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Waiting for the initiating browser",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(
+        "Only the browser that started this run can approve or reject it.",
+      ),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Approve staged restart" }),
+    ).not.toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Reject and restore demo" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("marks the pending approval checkpoint as the current timeline step", () => {
+    convexMock.useQuery.mockReturnValue(pendingApprovalState());
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ canDecide: false }), { status: 200 }),
+    );
+
+    render(<DemoDashboard />);
+
+    expect(
+      screen
+        .getByText("Paused before the fixed restart for browser approval")
+        .closest("li"),
+    ).toHaveAttribute("aria-current", "step");
+  });
+
+  it("retries a failed approval-session lookup without claiming a decision", async () => {
+    convexMock.useQuery.mockReturnValue(pendingApprovalState());
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockRejectedValueOnce(new Error("session unavailable"))
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ canDecide: true }), { status: 200 }),
+      );
+
+    render(<DemoDashboard />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Decision access unavailable",
+      }),
+    ).toBeInTheDocument();
+    expect(
+      screen.getByText(/retry before the approval window closes/i),
+    ).toBeInTheDocument();
+    fireEvent.click(
+      screen.getByRole("button", { name: "Retry decision access" }),
+    );
+
+    expect(
+      await screen.findByRole("button", { name: "Approve staged restart" }),
+    ).toBeEnabled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
+  it("describes an approved and verified restart as completed history", () => {
+    convexMock.useQuery.mockReturnValue(
+      pendingApprovalState({
+        active: false,
+        commandStatus: "complete",
+        incident: incident("resolved", {
+          finalHealth: "healthy",
+          finishedAt: BASE_TIME + 12_000,
+        }),
+        approval: {
+          status: "approved",
+          actionId: "restart_demo_service",
+          actionLabel: "linux agent restart fixed demo service",
+          requestedAt: BASE_TIME + 6_000,
+          expiresAt: BASE_TIME + 306_000,
+          decidedAt: BASE_TIME + 8_000,
+        },
+        steps: [
+          step(3, {
+            role: "executor",
+            kind: "recovery_executed",
+            safeCommandLabel: "linux agent restart fixed demo service",
+          }),
+          step(4, {
+            role: "verifier",
+            kind: "verification_completed",
+            safeCommandLabel: "linux agent check fixed demo service health",
+            sanitizedOutput: '{"healthy":true}',
+          }),
+        ],
+      }),
+    );
+
+    render(<DemoDashboard />);
+
+    const gate = screen.getByRole("region", {
+      name: "Approved restart completed",
+    });
+    expect(gate).toHaveTextContent(
+      "The fixed restart ran and a fresh health check verified the service is healthy.",
+    );
+    expect(gate).toHaveTextContent("Fixed executed action");
+    expect(gate).not.toHaveTextContent("Fixed proposed action");
+    expect(gate).not.toHaveTextContent(/may resume/i);
+  });
+
+  it("describes an approved failed recovery without claiming verification", () => {
+    convexMock.useQuery.mockReturnValue(
+      pendingApprovalState({
+        active: false,
+        commandStatus: "failed",
+        incident: incident("failed_recovery", {
+          finalHealth: "failed",
+          finishedAt: BASE_TIME + 12_000,
+        }),
+        approval: {
+          status: "approved",
+          actionId: "restart_demo_service",
+          actionLabel: "linux agent restart fixed demo service",
+          requestedAt: BASE_TIME + 6_000,
+          expiresAt: BASE_TIME + 306_000,
+          decidedAt: BASE_TIME + 8_000,
+        },
+        steps: [
+          step(3, {
+            role: "executor",
+            kind: "recovery_failed",
+            status: "failed",
+            safeCommandLabel: "linux agent restart fixed demo service",
+          }),
+        ],
+      }),
+    );
+
+    render(<DemoDashboard />);
+
+    const gate = screen.getByRole("region", {
+      name: "Approved recovery did not verify",
+    });
+    expect(gate).toHaveTextContent(
+      "The fixed restart was authorized and attempted, but recovery did not finish with verified health.",
+    );
+    expect(gate).toHaveTextContent("Fixed attempted action");
+    expect(gate).not.toHaveTextContent("Fixed proposed action");
+    expect(gate).not.toHaveTextContent(/may resume/i);
+  });
+
+  it.each([
+    ["rejected", "Staged restart rejected"],
+    ["expired", "Approval window expired"],
+  ] as const)(
+    "describes a %s approval after restoration as completed history",
+    (status, heading) => {
+      convexMock.useQuery.mockReturnValue(
+        pendingApprovalState({
+          active: false,
+          commandStatus: "complete",
+          incident: incident("needs_human", {
+            finalHealth: "failed",
+            finishedAt: BASE_TIME + 12_000,
+            environmentRecoveryStatus: "restored",
+            environmentRecoveryStartedAt: BASE_TIME + 9_000,
+            environmentRecoveredAt: BASE_TIME + 12_000,
+          }),
+          approval: {
+            status,
+            actionId: "restart_demo_service",
+            actionLabel: "linux agent restart fixed demo service",
+            requestedAt: BASE_TIME + 6_000,
+            expiresAt: BASE_TIME + 306_000,
+            decidedAt: BASE_TIME + 8_000,
+          },
+        }),
+      );
+
+      render(<DemoDashboard />);
+
+      const gate = screen.getByRole("region", { name: heading });
+      expect(gate).toHaveTextContent(
+        "No recovery action was authorized. The demo environment was restored and is healthy.",
+      );
+      expect(gate).not.toHaveTextContent("will be restored");
+    },
+  );
+
+  it("moves focus to the updated checkpoint after this browser decides", async () => {
+    let currentState = pendingApprovalState();
+    convexMock.useQuery.mockImplementation(() => currentState);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock.mockImplementation(async (input) =>
+      input === "/api/demo/approval/session"
+        ? new Response(JSON.stringify({ canDecide: true }), { status: 200 })
+        : new Response(null, { status: 200 }),
+    );
+
+    const view = render(<DemoDashboard />);
+    const approveButton = await screen.findByRole("button", {
+      name: "Approve staged restart",
+    });
+    approveButton.focus();
+    fireEvent.click(approveButton);
+    expect(
+      await screen.findByText(
+        "Approval recorded. The Linux runner can resume the staged restart.",
+      ),
+    ).toBeInTheDocument();
+
+    currentState = pendingApprovalState({
+      active: false,
+      commandStatus: "complete",
+      incident: incident("resolved", {
+        finalHealth: "healthy",
+        finishedAt: BASE_TIME + 12_000,
+      }),
+      approval: {
+        status: "approved",
+        actionId: "restart_demo_service",
+        actionLabel: "linux agent restart fixed demo service",
+        requestedAt: BASE_TIME + 6_000,
+        expiresAt: BASE_TIME + 306_000,
+        decidedAt: BASE_TIME + 8_000,
+      },
+      steps: [
+        step(3, {
+          role: "executor",
+          kind: "recovery_executed",
+          safeCommandLabel: "linux agent restart fixed demo service",
+        }),
+        step(4, {
+          role: "verifier",
+          kind: "verification_completed",
+          safeCommandLabel: "linux agent check fixed demo service health",
+          sanitizedOutput: '{"healthy":true}',
+        }),
+      ],
+    });
+    view.rerender(<DemoDashboard />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Approved restart completed",
+      }),
+    ).toHaveFocus();
+    expect(fetchMock).toHaveBeenCalledWith("/api/demo/approval/approve", {
+      method: "POST",
+    });
+  });
+
+  it("records a rejected approval without saying a decision is still required", () => {
+    const state = pendingApprovalState({
+      active: false,
+      commandStatus: "complete",
+      incident: incident("needs_human", {
+        finalHealth: "failed",
+        finishedAt: BASE_TIME + 8_000,
+        terminalReason: "approval_rejected",
+      }),
+      approval: {
+        status: "rejected",
+        actionId: "restart_demo_service",
+        actionLabel: "linux agent restart fixed demo service",
+        requestedAt: BASE_TIME + 6_000,
+        expiresAt: BASE_TIME + 66_000,
+        decidedAt: BASE_TIME + 8_000,
+      },
+      result: {
+        finalHealth: "failed",
+        totalLatencyMs: 8_000,
+      },
+    });
+    convexMock.useQuery.mockReturnValue(state);
+
+    render(<DemoDashboard />);
+
+    const resolution = screen
+      .getByRole("heading", { name: "Resolution record" })
+      .closest("aside");
+    expect(resolution).toHaveTextContent("Staged restart rejected");
+    expect(resolution).toHaveTextContent("No recovery action was authorized");
+    expect(resolution).not.toHaveTextContent("human decision required");
+    expect(
+      screen.getByRole("status", { name: "Demo status" }),
+    ).toHaveTextContent("Staged restart rejected");
+    expect(
+      screen.queryByRole("button", { name: "Approve staged restart" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    {
+      button: "Approve staged restart",
+      route: "/api/demo/approval/approve",
+      pendingLabel: "Recording approval…",
+      accepted:
+        "Approval recorded. The Linux runner can resume the staged restart.",
+    },
+    {
+      button: "Reject and restore demo",
+      route: "/api/demo/approval/reject",
+      pendingLabel: "Recording rejection…",
+      accepted:
+        "Rejection recorded. No recovery action was authorized.",
+    },
+  ])(
+    "submits the fixed bodyless decision route for $button",
+    async ({ button, route, pendingLabel, accepted }) => {
+      convexMock.useQuery.mockReturnValue(pendingApprovalState());
+      const fetchMock = vi.mocked(fetch);
+      let finishDecision: ((response: Response) => void) | undefined;
+      fetchMock.mockImplementation(async (input) => {
+        if (input === "/api/demo/approval/session") {
+          return new Response(JSON.stringify({ canDecide: true }), {
+            status: 200,
+          });
+        }
+        return await new Promise<Response>((resolve) => {
+          finishDecision = resolve;
+        });
+      });
+
+      render(<DemoDashboard />);
+      fireEvent.click(await screen.findByRole("button", { name: button }));
+
+      expect(
+        await screen.findByRole("button", { name: pendingLabel }),
+      ).toBeDisabled();
+      expect(
+        screen.getByRole("button", {
+          name:
+            button === "Approve staged restart"
+              ? "Reject and restore demo"
+              : "Approve staged restart",
+        }),
+      ).toBeDisabled();
+      expect(fetchMock).toHaveBeenCalledWith(route, { method: "POST" });
+      const decisionCall = fetchMock.mock.calls.find(
+        ([input]) => input === route,
+      );
+      expect(decisionCall?.[1]).not.toHaveProperty("body");
+
+      await act(async () => {
+        finishDecision?.(new Response(null, { status: 202 }));
+      });
+      expect(await screen.findByText(accepted)).toHaveAttribute(
+        "aria-live",
+        "polite",
+      );
+    },
+  );
+
+  it("keeps the approval checkpoint and resolution before the timeline on phone", async () => {
+    convexMock.useQuery.mockReturnValue(pendingApprovalState());
+    vi.mocked(fetch).mockResolvedValue(
+      new Response(JSON.stringify({ canDecide: false }), { status: 200 }),
+    );
+
+    render(<DemoDashboard />);
+
+    const approval = (
+      await screen.findByRole("heading", {
+        name: "Waiting for the initiating browser",
+      })
+    ).closest("section");
+    const resolution = screen
+      .getByRole("heading", { name: "Resolution record" })
+      .closest("aside");
+    const timeline = screen
+      .getByRole("heading", { name: "Incident timeline" })
+      .closest("section");
+    expect(approval).not.toBeNull();
+    expect(resolution).not.toBeNull();
+    expect(timeline).not.toBeNull();
+    expect(
+      approval!.compareDocumentPosition(resolution!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+    expect(
+      resolution!.compareDocumentPosition(timeline!) &
+        Node.DOCUMENT_POSITION_FOLLOWING,
+    ).toBeTruthy();
+
+    const css = readFileSync(
+      join(process.cwd(), "src/app/globals.css"),
+      "utf8",
+    );
+    expect(css).toMatch(
+      /\.approval-action[\s\S]*?min-height:\s*(?:4[4-9]|[5-9]\d)px/,
+    );
+    expect(css).toMatch(
+      /@media \(max-width: 620px\)[\s\S]*?\.approval-actions[\s\S]*?grid-template-columns:\s*1fr/,
+    );
   });
 
   it("wraps long sanitized output and never renders extra secret fields", () => {

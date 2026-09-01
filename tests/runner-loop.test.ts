@@ -181,6 +181,67 @@ describe("runner process loop", () => {
     await runtime.stop();
   });
 
+  it("stays idle after an approval pause and resumes on the approved update", async () => {
+    const fakeClient = new FakeRunnerClient();
+    const seenStatuses: string[] = [];
+    const runtime = await startRunnerLoop({
+      client: asClient(fakeClient),
+      orchestrator: {
+        async run(snapshot): Promise<OrchestrationResult> {
+          const approvalStatus = snapshot.recovery?.approvalStatus ?? "none";
+          seenStatuses.push(approvalStatus);
+          return approvalStatus === "pending"
+            ? {
+                status: "awaiting_approval",
+                demoCommandId: snapshot.id,
+                incidentId: snapshot.incident?.id,
+              }
+            : {
+                status: "resolved",
+                demoCommandId: snapshot.id,
+                incidentId: snapshot.incident?.id ?? "incident_1",
+              };
+        },
+      },
+      heartbeatIntervalMs: 60_000,
+    });
+    const pending = {
+      ...command("command_approval"),
+      executionMode: "approval_required" as const,
+      recovery: {
+        id: "recovery_1",
+        actionId: "restart_demo_service" as const,
+        status: "proposed" as const,
+        stateVersion: 1,
+        executionNonce: "execution_command_approval",
+        completedAt: null,
+        executionEvidence: null,
+        approvalStatus: "pending" as const,
+      },
+    };
+
+    fakeClient.commandCallback?.(pending);
+    await flushPromises();
+    expect(seenStatuses).toEqual(["pending"]);
+
+    await flushPromises();
+    expect(seenStatuses).toEqual(["pending"]);
+
+    fakeClient.commandCallback?.({
+      ...pending,
+      recovery: {
+        ...pending.recovery,
+        status: "allowed",
+        stateVersion: 2,
+        approvalStatus: "approved",
+      },
+    });
+    await flushPromises();
+
+    expect(seenStatuses).toEqual(["pending", "approved"]);
+    await runtime.stop();
+  });
+
   it("waits for one heartbeat to finish before scheduling another", async () => {
     vi.useFakeTimers();
     const fakeClient = new FakeRunnerClient();

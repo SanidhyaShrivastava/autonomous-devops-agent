@@ -6,6 +6,15 @@ A GrowthX Build Week project proving a bounded operational recovery loop: detect
 - Status: the complete M1 recovery loop is live. Fresh post-cutover public runs now pass through an authenticated Linux sandbox agent instead of direct host-side Docker control.
 - Surface: Sanidhya-owned disposable Linux sandbox in Docker only. Current evidence is controlled/staged and cannot support an L4 or L5 real-output claim.
 
+## Hybrid autonomy proof
+
+The same fixed service recovery now has two staged modes:
+
+- **Autonomous:** after the evidence-backed diagnosis and deterministic policy check, the allowlisted restart continues automatically.
+- **Approval required:** the run pauses before execution. Only the browser that started that run can approve or reject the same fixed restart; another browser is read-only. Approval resumes through the authenticated runner, while rejection or expiry executes no recovery and restores the disposable service safely.
+
+The public demo has no user account and does not identify an approver. Its short-lived browser key is stored in an `HttpOnly`, `Secure`, `SameSite=Strict` cookie; Convex stores only a server-derived digest. The browser never supplies a command, workload, path, server, or action. This proves the control mechanism on a staged surface only; it is not production authorization.
+
 ## Original M1 evidence
 
 On Sun 30 Aug 2026, three separate public recovery-demo runs completed without terminal assistance after the click:
@@ -46,7 +55,7 @@ On Tue 1 Sep 2026, the production coordinator was cut over to the isolated Linux
 - A successful restart operation never proves recovery; a fresh HTTP 200 response with the expected service identity and `status: healthy` is required.
 - The container has no Docker socket, host mount, elevated privilege, added capability, host process access, host network, employer system, customer system, production data, or arbitrary shell authority.
 - Any future real-user environment remains approval-first until action-level trust is validated.
-- The staged public demo has no human approval step; its single restart is allowlisted and policy-checked automatically.
+- The staged public demo offers both an automatic policy-checked path and a browser approval path for the same fixed action; neither path grants arbitrary authority.
 
 ## Local verification
 

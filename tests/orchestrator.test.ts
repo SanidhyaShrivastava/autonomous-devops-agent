@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, expectTypeOf, it, vi } from "vitest";
 
 import type {
   HealthEvidence,
@@ -16,6 +16,7 @@ import {
   type RunnerStepInput,
   type UpdateIncidentPhaseInput,
 } from "../runner/orchestrator";
+import type { AgentRole } from "../src/lib/contracts";
 import { evaluateRecoveryPolicy } from "../src/lib/policy";
 
 const BASE_TIME = Date.UTC(2026, 7, 30, 14, 0, 0);
@@ -40,6 +41,11 @@ const QUEUED_COMMAND: RecoveryCommandSnapshot = {
   incident: null,
   recovery: null,
   stepNonces: [],
+};
+
+const APPROVAL_QUEUED_COMMAND: RecoveryCommandSnapshot = {
+  ...QUEUED_COMMAND,
+  executionMode: "approval_required",
 };
 
 const FAILED_HEALTH: HealthEvidence = {
@@ -352,6 +358,235 @@ afterEach(() => {
 });
 
 describe("complete staged recovery orchestration", () => {
+  it("does not expose the human operator role to runner step writes", () => {
+    expectTypeOf<RunnerStepInput["role"]>().toEqualTypeOf<
+      Exclude<AgentRole, "human_operator">
+    >();
+  });
+
+  it("pauses an approval-mode run after policy without restarting", async () => {
+    const harness = createHarness();
+
+    const result = await harness.orchestrator.run(APPROVAL_QUEUED_COMMAND);
+
+    expect(result).toEqual({
+      status: "awaiting_approval",
+      demoCommandId: "command_1",
+      incidentId: "incident_1",
+    });
+    expect(harness.workload.restartAttempts).toBe(0);
+    expect(harness.state.phaseUpdates.at(-1)).toMatchObject({
+      expectedPhase: "policy_check",
+      nextPhase: "awaiting_approval",
+      recoveryCommandId: "recovery_1",
+      executionNonce: "execution_command_1",
+    });
+    expect(harness.state.steps.at(-1)).toMatchObject({
+      role: "policy_gate",
+      kind: "approval_requested",
+      status: "pending",
+      safeCommandLabel: "linux agent restart fixed demo service",
+    });
+    expect(harness.calls.indexOf("state.append:approval_requested")).toBeLessThan(
+      harness.calls.indexOf("state.update:awaiting_approval"),
+    );
+    expect(harness.calls).not.toContain("workload.execute");
+    expect(harness.calls).not.toContain("workload.verify");
+  });
+
+  it("keeps a pending approval snapshot paused without touching the workload", async () => {
+    const harness = createHarness();
+    const pending: RecoveryCommandSnapshot = {
+      ...APPROVAL_QUEUED_COMMAND,
+      status: "failure_confirmed",
+      stateVersion: 3,
+      incident: {
+        id: "incident_1",
+        currentPhase: "awaiting_approval",
+        stateVersion: 5,
+        incidentCategory: "service_stopped",
+        diagnosisEvidence: [
+          "Health check healthy: false",
+          "Container status: exited",
+        ],
+        diagnosisSummary: "The disposable demo service is stopped.",
+        confidence: 0.96,
+        requiresHuman: false,
+        proposedActionId: "restart_demo_service",
+      },
+      recovery: {
+        id: "recovery_1",
+        actionId: "restart_demo_service",
+        status: "proposed",
+        stateVersion: 1,
+        executionNonce: "execution_command_1",
+        completedAt: null,
+        executionEvidence: null,
+        approvalStatus: "pending",
+        approvalRequestedAt: BASE_TIME,
+        approvalExpiresAt: BASE_TIME + 300_000,
+        approvalDecidedAt: null,
+      },
+      stepNonces: ["step_failure_confirmed_saved"],
+    };
+
+    const result = await harness.orchestrator.run(pending);
+
+    expect(result.status).toBe("awaiting_approval");
+    expect(harness.calls).toEqual(["state.renewLease"]);
+    expect(harness.workload.restartAttempts).toBe(0);
+    expect(harness.investigator.investigate).not.toHaveBeenCalled();
+    expect(harness.policy).not.toHaveBeenCalled();
+  });
+
+  it("recovers a saved proposal after a runner restart before the approval phase was stored", async () => {
+    const harness = createHarness();
+    const policyCheck: RecoveryCommandSnapshot = {
+      ...APPROVAL_QUEUED_COMMAND,
+      status: "failure_confirmed",
+      stateVersion: 3,
+      incident: {
+        id: "incident_1",
+        currentPhase: "policy_check",
+        stateVersion: 4,
+        incidentCategory: "service_stopped",
+        diagnosisEvidence: ["Container status: exited"],
+        diagnosisSummary: "The disposable demo service is stopped.",
+        confidence: 0.96,
+        requiresHuman: false,
+        proposedActionId: "restart_demo_service",
+      },
+      recovery: {
+        id: "recovery_1",
+        actionId: "restart_demo_service",
+        status: "proposed",
+        stateVersion: 0,
+        executionNonce: "execution_command_1",
+        completedAt: null,
+        executionEvidence: null,
+        approvalStatus: "pending",
+        approvalRequestedAt: BASE_TIME,
+        approvalExpiresAt: BASE_TIME + 300_000,
+        approvalDecidedAt: null,
+      },
+      stepNonces: ["step_failure_confirmed_saved"],
+    };
+
+    const result = await harness.orchestrator.run(policyCheck);
+
+    expect(result.status).toBe("awaiting_approval");
+    expect(harness.workload.restartAttempts).toBe(0);
+    expect(harness.calls).toContain("state.update:awaiting_approval");
+    expect(harness.state.completions).toHaveLength(0);
+  });
+
+  it("replays a saved approval request without opening the gate first or duplicating the step", async () => {
+    const interrupted = createHarness();
+    interrupted.state.failOn = "updateIncidentPhase:awaiting_approval";
+
+    const interruptedResult = await interrupted.orchestrator.run(
+      APPROVAL_QUEUED_COMMAND,
+    );
+    const savedApprovalStep = interrupted.state.steps.find(
+      (step) => step.kind === "approval_requested",
+    );
+
+    expect(interruptedResult.status).toBe("state_conflict");
+    expect(savedApprovalStep?.stepNonce).toBeTruthy();
+    expect(interrupted.calls.indexOf("state.append:approval_requested")).toBeLessThan(
+      interrupted.calls.indexOf("state.update:awaiting_approval"),
+    );
+
+    const resumed = createHarness();
+    const policyCheck: RecoveryCommandSnapshot = {
+      ...APPROVAL_QUEUED_COMMAND,
+      status: "failure_confirmed",
+      stateVersion: 3,
+      incident: {
+        id: "incident_1",
+        currentPhase: "policy_check",
+        stateVersion: 4,
+        incidentCategory: "service_stopped",
+        diagnosisEvidence: ["Container status: exited"],
+        diagnosisSummary: "The disposable demo service is stopped.",
+        confidence: 0.96,
+        requiresHuman: false,
+        proposedActionId: "restart_demo_service",
+      },
+      recovery: {
+        id: "recovery_1",
+        actionId: "restart_demo_service",
+        status: "proposed",
+        stateVersion: 0,
+        executionNonce: "execution_command_1",
+        completedAt: null,
+        executionEvidence: null,
+        approvalStatus: "pending",
+        approvalRequestedAt: BASE_TIME,
+        approvalExpiresAt: BASE_TIME + 300_000,
+        approvalDecidedAt: null,
+      },
+      stepNonces: [savedApprovalStep!.stepNonce],
+    };
+
+    const resumedResult = await resumed.orchestrator.run(policyCheck);
+
+    expect(resumedResult.status).toBe("awaiting_approval");
+    expect(resumed.calls).not.toContain("state.append:approval_requested");
+    expect(resumed.calls).toContain("state.update:awaiting_approval");
+    expect(resumed.workload.restartAttempts).toBe(0);
+  });
+
+  it("resumes one approved recovery and resolves only after fresh health", async () => {
+    const harness = createHarness();
+    const approved: RecoveryCommandSnapshot = {
+      ...APPROVAL_QUEUED_COMMAND,
+      status: "failure_confirmed",
+      stateVersion: 3,
+      incident: {
+        id: "incident_1",
+        currentPhase: "awaiting_approval",
+        stateVersion: 5,
+        incidentCategory: "service_stopped",
+        diagnosisEvidence: [
+          "Health check healthy: false",
+          "Container status: exited",
+        ],
+        diagnosisSummary: "The disposable demo service is stopped.",
+        confidence: 0.96,
+        requiresHuman: false,
+        proposedActionId: "restart_demo_service",
+      },
+      recovery: {
+        id: "recovery_1",
+        actionId: "restart_demo_service",
+        status: "proposed",
+        stateVersion: 2,
+        executionNonce: "execution_command_1",
+        completedAt: null,
+        executionEvidence: null,
+        approvalStatus: "approved",
+        approvalRequestedAt: BASE_TIME,
+        approvalExpiresAt: BASE_TIME + 300_000,
+        approvalDecidedAt: BASE_TIME + 20_000,
+      },
+      stepNonces: ["step_failure_confirmed_saved"],
+    };
+
+    const result = await harness.orchestrator.run(approved);
+
+    expect(result.status).toBe("resolved");
+    expect(harness.workload.restartAttempts).toBe(1);
+    expect(harness.calls).toContain("policy.evaluate");
+    expect(harness.calls.indexOf("state.update:executing")).toBeLessThan(
+      harness.calls.indexOf("workload.execute"),
+    );
+    expect(harness.calls.indexOf("workload.execute")).toBeLessThan(
+      harness.calls.indexOf("workload.verify"),
+    );
+    expect(harness.investigator.investigate).not.toHaveBeenCalled();
+  });
+
   it("persists the Linux agent label in executor and durable execution evidence", async () => {
     const harness = createHarness();
     harness.workload.commandLabel =

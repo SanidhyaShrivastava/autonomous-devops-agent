@@ -231,6 +231,7 @@ describe("Convex runner client", () => {
       claimedAt: 20,
       leaseExpiresAt: 2_000,
       stateVersion: 3,
+      executionMode: "autonomous",
       incidentId: "incident_1",
       incident: {
         _id: "incident_1",
@@ -254,6 +255,10 @@ describe("Convex runner client", () => {
         executionNonce: "execution_command_1",
         completedAt: null,
         executionEvidence: null,
+        approvalStatus: null,
+        approvalRequestedAt: null,
+        approvalExpiresAt: null,
+        approvalDecidedAt: null,
       },
       stepNonces: ["step_failure_confirmed_command_1"],
     });
@@ -267,6 +272,7 @@ describe("Convex runner client", () => {
       expiresAt: 1_000,
       leaseExpiresAt: 2_000,
       stateVersion: 3,
+      executionMode: "autonomous",
       incident: {
         id: "incident_1",
         currentPhase: "policy_check",
@@ -289,9 +295,78 @@ describe("Convex runner client", () => {
         executionNonce: "execution_command_1",
         completedAt: null,
         executionEvidence: null,
+        approvalStatus: null,
+        approvalRequestedAt: null,
+        approvalExpiresAt: null,
+        approvalDecidedAt: null,
       },
       stepNonces: ["step_failure_confirmed_command_1"],
     });
+  });
+
+  it("maps a durable pending approval without exposing its capability", () => {
+    const fake = new FakeConvexClient();
+    const client = makeClient(fake);
+    const onCommand = vi.fn();
+    const onError = vi.fn();
+
+    client.subscribeToActiveCommand(onCommand, onError);
+    fake.updateCallback?.({
+      _id: "command_approval",
+      kind: "RESET_DEMO_V1",
+      status: "failure_confirmed",
+      createdAt: 10,
+      expiresAt: 1_000,
+      claimedAt: 20,
+      leaseExpiresAt: 2_000,
+      stateVersion: 3,
+      executionMode: "approval_required",
+      incidentId: "incident_approval",
+      incident: {
+        _id: "incident_approval",
+        currentPhase: "awaiting_approval",
+        stateVersion: 5,
+        incidentCategory: "service_stopped",
+        diagnosisEvidence: ["Container status: exited"],
+        diagnosisSummary: "The fixed demo service is stopped.",
+        confidence: 0.99,
+        requiresHuman: false,
+        proposedActionId: "restart_demo_service",
+      },
+      recovery: {
+        _id: "recovery_approval",
+        actionId: "restart_demo_service",
+        status: "proposed",
+        stateVersion: 1,
+        executionNonce: "execution_command_approval",
+        completedAt: null,
+        executionEvidence: null,
+        approvalStatus: "pending",
+        approvalRequestedAt: 100,
+        approvalExpiresAt: 300_100,
+        approvalDecidedAt: null,
+      },
+      stepNonces: ["step_approval_requested_saved"],
+    });
+
+    expect(onError).not.toHaveBeenCalled();
+    expect(onCommand).toHaveBeenCalledWith(
+      expect.objectContaining({
+        executionMode: "approval_required",
+        incident: expect.objectContaining({
+          currentPhase: "awaiting_approval",
+        }),
+        recovery: expect.objectContaining({
+          approvalStatus: "pending",
+          approvalRequestedAt: 100,
+          approvalExpiresAt: 300_100,
+          approvalDecidedAt: null,
+        }),
+      }),
+    );
+    expect(onCommand.mock.calls[0]?.[0]).not.toHaveProperty(
+      "approvalCapabilityDigest",
+    );
   });
 
   it("passes an empty active command through as null", () => {

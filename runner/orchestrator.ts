@@ -82,6 +82,15 @@ export interface RecoverySnapshot {
   readonly executionNonce: string;
   readonly completedAt: number | null;
   readonly executionEvidence: RecoveryExecutionEvidence | null;
+  readonly approvalStatus?:
+    | "pending"
+    | "approved"
+    | "rejected"
+    | "expired"
+    | null;
+  readonly approvalRequestedAt?: number | null;
+  readonly approvalExpiresAt?: number | null;
+  readonly approvalDecidedAt?: number | null;
 }
 
 export interface RecoveryCommandSnapshot {
@@ -92,6 +101,7 @@ export interface RecoveryCommandSnapshot {
   readonly expiresAt: number;
   readonly leaseExpiresAt: number | null;
   readonly stateVersion: number;
+  readonly executionMode?: "autonomous" | "approval_required";
   readonly incident: IncidentSnapshot | null;
   readonly recovery: RecoverySnapshot | null;
   readonly stepNonces: readonly string[];
@@ -124,7 +134,7 @@ export interface RunnerStepInput {
   readonly expectedCommandStateVersion: number;
   readonly expectedIncidentStateVersion?: number;
   readonly stepNonce: string;
-  readonly role: AgentRole;
+  readonly role: Exclude<AgentRole, "human_operator">;
   readonly kind: string;
   readonly status: StepStatus;
   readonly safeCommandLabel?: string;
@@ -291,7 +301,11 @@ export type OrchestrationResult =
       readonly incidentId: string;
     }
   | {
-      readonly status: "command_failed" | "state_conflict" | "ignored";
+      readonly status:
+        | "awaiting_approval"
+        | "command_failed"
+        | "state_conflict"
+        | "ignored";
       readonly demoCommandId: string;
       readonly incidentId?: string;
     };
@@ -384,6 +398,7 @@ export function createRecoveryOrchestrator(
       let commandStateVersion = command.stateVersion;
       let incident = command.incident ? { ...command.incident } : null;
       let recovery = command.recovery ? { ...command.recovery } : null;
+      const executionMode = command.executionMode ?? "autonomous";
       const persistedStepNonces = new Set(command.stepNonces);
       let failedHealth: HealthEvidence | null = null;
       let leaseTimer: ReturnType<typeof setInterval> | null = null;
@@ -965,6 +980,8 @@ export function createRecoveryOrchestrator(
           incident.stateVersion = policyCheck.stateVersion;
         }
 
+        let enteredExecutingThisRun = false;
+
         if (incident.currentPhase === "policy_check") {
           const executionNonce =
             recovery?.executionNonce ??
@@ -980,7 +997,9 @@ export function createRecoveryOrchestrator(
             runnerId: DEMO_RUNNER_ID,
             executionId: executionNonce,
             previousExecutionIds:
-              recovery && recovery.status !== "allowed"
+              recovery &&
+              recovery.status !== "allowed" &&
+              recovery.status !== "proposed"
                 ? [recovery.executionNonce]
                 : [],
           });
@@ -1018,13 +1037,66 @@ export function createRecoveryOrchestrator(
             recovery = {
               id: createdRecovery.recoveryCommandId,
               actionId: DEMO_ACTION_ID,
-              status: "allowed",
+              status:
+                executionMode === "approval_required"
+                  ? "proposed"
+                  : "allowed",
               stateVersion: createdRecovery.stateVersion,
               executionNonce,
               completedAt: null,
               executionEvidence: null,
+              approvalStatus:
+                executionMode === "approval_required" ? "pending" : null,
             };
-          } else if (recovery.status !== "allowed") {
+          }
+
+          if (executionMode === "approval_required") {
+            if (
+              recovery.status !== "proposed" ||
+              recovery.approvalStatus !== "pending"
+            ) {
+              return await complete(
+                "needs_human",
+                "approval_record_not_safe_to_wait",
+                "failed",
+              );
+            }
+            const approvalRequestedAt = now();
+            await appendStep("approval_requested", {
+              role: "policy_gate",
+              kind: "approval_requested",
+              status: "pending",
+              safeCommandLabel: "linux agent restart fixed demo service",
+              sanitizedOutput: safeJson({
+                actionId: DEMO_ACTION_ID,
+                decision: "waiting_for_starting_visitor",
+              }),
+              startedAt: approvalRequestedAt,
+              costStatus: "not_reported",
+            });
+            const awaitingApproval = await state.updateIncidentPhase({
+              demoCommandId: command.id,
+              incidentId: incident.id,
+              expectedPhase: "policy_check",
+              nextPhase: "awaiting_approval",
+              expectedStateVersion: incident.stateVersion,
+              expectedCommandStateVersion: commandStateVersion,
+              recoveryCommandId: recovery.id,
+              expectedRecoveryStateVersion: recovery.stateVersion,
+              executionNonce: recovery.executionNonce,
+            });
+            incident.currentPhase = "awaiting_approval";
+            incident.stateVersion = awaitingApproval.stateVersion;
+            recovery.stateVersion =
+              awaitingApproval.recoveryStateVersion ?? recovery.stateVersion;
+            return {
+              status: "awaiting_approval",
+              demoCommandId: command.id,
+              incidentId: incident.id,
+            };
+          }
+
+          if (recovery.status !== "allowed") {
             return await complete(
               "needs_human",
               "recovery_command_not_safe_to_resume",
@@ -1048,7 +1120,75 @@ export function createRecoveryOrchestrator(
           recovery.status = "executing";
           recovery.stateVersion =
             executing.recoveryStateVersion ?? recovery.stateVersion + 1;
+          enteredExecutingThisRun = true;
+        }
 
+        if (incident.currentPhase === "awaiting_approval") {
+          if (
+            executionMode !== "approval_required" ||
+            !recovery ||
+            recovery.actionId !== DEMO_ACTION_ID
+          ) {
+            throw new Error("Approval wait is missing its fixed recovery");
+          }
+          if (recovery.approvalStatus === "pending") {
+            return {
+              status: "awaiting_approval",
+              demoCommandId: command.id,
+              incidentId: incident.id,
+            };
+          }
+          if (
+            recovery.approvalStatus !== "approved" ||
+            recovery.status !== "proposed"
+          ) {
+            throw new Error("Approval wait is not approved to resume");
+          }
+
+          const resumedPolicyDecision = policy({
+            incidentId: incident.id,
+            activeIncidentId: incident.id,
+            incidentState: "policy_check",
+            workloadId: DEMO_WORKLOAD_ID,
+            actionId: incident.proposedActionId,
+            confidence: incident.confidence,
+            runnerId: DEMO_RUNNER_ID,
+            executionId: recovery.executionNonce,
+            previousExecutionIds: [],
+          });
+          if (!resumedPolicyDecision.allowed || incident.requiresHuman) {
+            return await complete(
+              "needs_human",
+              resumedPolicyDecision.allowed
+                ? "diagnosis_requires_human"
+                : `policy_${resumedPolicyDecision.reason}`,
+              "failed",
+            );
+          }
+
+          const executing = await state.updateIncidentPhase({
+            demoCommandId: command.id,
+            incidentId: incident.id,
+            expectedPhase: "awaiting_approval",
+            nextPhase: "executing",
+            expectedStateVersion: incident.stateVersion,
+            expectedCommandStateVersion: commandStateVersion,
+            recoveryCommandId: recovery.id,
+            expectedRecoveryStateVersion: recovery.stateVersion,
+            executionNonce: recovery.executionNonce,
+          });
+          incident.currentPhase = "executing";
+          incident.stateVersion = executing.stateVersion;
+          recovery.status = "executing";
+          recovery.stateVersion =
+            executing.recoveryStateVersion ?? recovery.stateVersion + 1;
+          enteredExecutingThisRun = true;
+        }
+
+        if (incident.currentPhase === "executing" && enteredExecutingThisRun) {
+          if (!recovery) {
+            throw new Error("Executing incident has no recovery command");
+          }
           let actionResult: RecoveryActionResult | null = null;
           let recoveryMutationActive = false;
           try {

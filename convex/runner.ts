@@ -40,6 +40,7 @@ const incidentPhase = v.union(
   v.literal("investigating"),
   v.literal("manager_review"),
   v.literal("policy_check"),
+  v.literal("awaiting_approval"),
   v.literal("executing"),
   v.literal("verifying"),
   v.literal("resolved"),
@@ -81,6 +82,8 @@ const costStatus = v.union(
 type IncidentPhase = Doc<"incidents">["currentPhase"];
 type DatabaseContext = Pick<QueryCtx, "db"> | Pick<MutationCtx, "db">;
 
+const APPROVAL_WINDOW_MS = 5 * 60 * 1_000;
+
 const TERMINAL_STATES = new Set<IncidentPhase>([
   "resolved",
   "needs_human",
@@ -107,7 +110,8 @@ const ALLOWED_NEXT_PHASES: Readonly<
     "investigation_failed",
   ],
   manager_review: ["policy_check", "needs_human"],
-  policy_check: ["executing", "needs_human"],
+  policy_check: ["awaiting_approval", "executing", "needs_human"],
+  awaiting_approval: ["executing", "needs_human"],
   executing: ["verifying", "failed_recovery"],
   verifying: ["resolved", "failed_recovery"],
   resolved: [],
@@ -252,6 +256,143 @@ async function latestStep(
     .first();
 }
 
+function isPendingApprovalState(
+  command: Doc<"demoCommands">,
+  incident: Doc<"incidents"> | null,
+  recovery: Doc<"recoveryCommands"> | null,
+) {
+  return Boolean(
+    incident &&
+      recovery &&
+      command.executionMode === "approval_required" &&
+      command.approvalCapabilityDigest &&
+      incident.demoCommandId === command._id &&
+      incident.currentPhase === "awaiting_approval" &&
+      recovery.demoCommandId === command._id &&
+      recovery.incidentId === incident._id &&
+      recovery.status === "proposed" &&
+      recovery.approvalStatus === "pending" &&
+      recovery.approvalCapabilityDigest ===
+        command.approvalCapabilityDigest &&
+      recovery.approvalExpiresAt !== undefined,
+  );
+}
+
+async function closePendingApprovalRequestStep(
+  ctx: MutationCtx,
+  command: Doc<"demoCommands">,
+  incident: Doc<"incidents">,
+  now: number,
+  allowMissing = false,
+) {
+  const matchingRequests = (
+    await ctx.db
+      .query("steps")
+      .withIndex("by_demo_command_sequence", (q) =>
+        q.eq("demoCommandId", command._id),
+      )
+      .order("desc")
+      .collect()
+  ).filter(
+    (step) =>
+      step.incidentId === incident._id && step.kind === "approval_requested",
+  );
+  const pendingRequests = matchingRequests.filter(
+    (step) => step.status === "pending" && step.finishedAt === undefined,
+  );
+  if (allowMissing && matchingRequests.length === 0) {
+    return null;
+  }
+  const latestRequest = matchingRequests[0];
+  if (
+    !latestRequest ||
+    pendingRequests.length !== 1 ||
+    pendingRequests[0]?._id !== latestRequest._id ||
+    latestRequest.role !== "policy_gate" ||
+    latestRequest.safeCommandLabel !== LINUX_AGENT_RECOVERY_LABEL ||
+    latestRequest.startedAt > now
+  ) {
+    rejectWithCode("APPROVAL_REQUEST_STEP_INVALID");
+  }
+
+  await ctx.db.patch(latestRequest._id, {
+    status: "blocked",
+    finishedAt: now,
+    latencyMs: Math.floor(now - latestRequest.startedAt),
+  });
+  return latestRequest;
+}
+
+async function expirePendingApproval(
+  ctx: MutationCtx,
+  control: Doc<"demoControl">,
+  command: Doc<"demoCommands">,
+  incident: Doc<"incidents">,
+  recovery: Doc<"recoveryCommands">,
+  now: number,
+) {
+  if (!isPendingApprovalState(command, incident, recovery)) {
+    rejectWithCode("APPROVAL_NOT_PENDING");
+  }
+  await closePendingApprovalRequestStep(ctx, command, incident, now);
+  const completed = await latestCompletedStep(ctx, command._id);
+  const last = await latestStep(ctx, command._id);
+
+  await ctx.db.patch(recovery._id, {
+    status: "blocked",
+    approvalStatus: "expired",
+    approvalDecidedAt: now,
+    completedAt: now,
+    stateVersion: recovery.stateVersion + 1,
+  });
+  await ctx.db.patch(incident._id, {
+    status: "needs_human",
+    currentPhase: "needs_human",
+    finalHealth: "failed",
+    finishedAt: now,
+    totalLatencyMs: Math.max(0, now - incident.startedAt),
+    terminalReason: "approval_expired",
+    lastCompletedStepSequence: completed?.sequence ?? 0,
+    lastCompletedStepLabel: completedStepLabel(completed),
+    environmentRecoveryStatus: "pending",
+    environmentRecoveryStartedAt: undefined,
+    environmentRecoveredAt: undefined,
+    environmentRecoveryError: undefined,
+    stateVersion: incident.stateVersion + 1,
+  });
+  await ctx.db.insert("steps", {
+    demoCommandId: command._id,
+    incidentId: incident._id,
+    sequence: (last?.sequence ?? 0) + 1,
+    stepNonce: `approval_expired_${command._id}`,
+    role: "policy_gate",
+    kind: "approval_expired",
+    status: "blocked",
+    errorSummary: "The staged approval window expired before a decision.",
+    startedAt: now,
+    finishedAt: now,
+    latencyMs: 0,
+    costStatus: "not_reported",
+  });
+  await ctx.db.patch(command._id, {
+    status: "complete",
+    finishedAt: now,
+    leaseExpiresAt: undefined,
+    stateVersion: command.stateVersion + 1,
+  });
+  await ctx.db.patch(control._id, {
+    activeDemoCommandId: undefined,
+    activeIncidentId: undefined,
+    environmentRecoveryIncidentId: incident._id,
+  });
+
+  return {
+    status: "expired" as const,
+    reason: "approval_expired" as const,
+    incidentId: incident._id,
+  };
+}
+
 async function failActiveRunFromWatchdog(
   ctx: MutationCtx,
   control: Doc<"demoControl">,
@@ -334,9 +475,26 @@ async function failActiveRunFromWatchdog(
       recovery.status !== "failed" &&
       recovery.status !== "blocked"
     ) {
+      if (recovery.approvalStatus === "pending") {
+        await closePendingApprovalRequestStep(
+          ctx,
+          command,
+          terminalIncident,
+          now,
+          terminalIncident.currentPhase === "policy_check",
+        );
+      }
       await ctx.db.patch(recovery._id, {
         status: "failed",
         completedAt: now,
+        approvalStatus:
+          recovery.approvalStatus === "pending"
+            ? "expired"
+            : recovery.approvalStatus,
+        approvalDecidedAt:
+          recovery.approvalStatus === "pending"
+            ? now
+            : recovery.approvalDecidedAt,
         stateVersion: recovery.stateVersion + 1,
       });
     }
@@ -365,7 +523,6 @@ async function failActiveRunFromWatchdog(
   await ctx.db.patch(control._id, {
     activeDemoCommandId: undefined,
     activeIncidentId: undefined,
-    lastRequestedAt: undefined,
     environmentRecoveryIncidentId: terminalIncident?._id,
   });
 
@@ -394,6 +551,30 @@ async function cleanExpiredActiveRun(
     return true;
   }
 
+  const incident = control.activeIncidentId
+    ? await ctx.db.get(control.activeIncidentId)
+    : null;
+  const recovery = incident
+    ? await ctx.db
+        .query("recoveryCommands")
+        .withIndex("by_incident", (q) => q.eq("incidentId", incident._id))
+        .unique()
+    : null;
+  if (isPendingApprovalState(command, incident, recovery)) {
+    if (now >= recovery!.approvalExpiresAt!) {
+      await expirePendingApproval(
+        ctx,
+        control,
+        command,
+        incident!,
+        recovery!,
+        now,
+      );
+      return true;
+    }
+    return false;
+  }
+
   const queuedExpired = command.status === "queued" && now > command.expiresAt;
   const leaseExpired =
     command.status !== "queued" &&
@@ -406,9 +587,6 @@ async function cleanExpiredActiveRun(
     return false;
   }
 
-  const incident = control.activeIncidentId
-    ? await ctx.db.get(control.activeIncidentId)
-    : null;
   const completed = await latestCompletedStep(ctx, command._id);
   const lastCompletedStepSequence = completed?.sequence ?? 0;
   const lastCompletedStepLabel = completedStepLabel(completed);
@@ -452,6 +630,44 @@ export const watchActiveRun = internalMutation({
     const incident = control.activeIncidentId
       ? await ctx.db.get(control.activeIncidentId)
       : null;
+    const recovery = incident
+      ? await ctx.db
+          .query("recoveryCommands")
+          .withIndex("by_incident", (q) => q.eq("incidentId", incident._id))
+          .unique()
+      : null;
+    if (isPendingApprovalState(command, incident, recovery)) {
+      const runnerLost =
+        control.runnerHeartbeatAt === undefined ||
+        now - control.runnerHeartbeatAt >= RUNNER_HEARTBEAT_LOSS_MS;
+      if (runnerLost) {
+        const completed = await latestCompletedStep(ctx, command._id);
+        return await failActiveRunFromWatchdog(
+          ctx,
+          control,
+          command,
+          incident,
+          `runner lost after step ${completed?.sequence ?? 0}: ${completedStepLabel(completed)}`,
+          "runner_lost",
+          now,
+        );
+      }
+      if (now >= recovery!.approvalExpiresAt!) {
+        return await expirePendingApproval(
+          ctx,
+          control,
+          command,
+          incident!,
+          recovery!,
+          now,
+        );
+      }
+      return {
+        status: "awaiting_approval" as const,
+        incidentId: incident!._id,
+        expiresAt: recovery!.approvalExpiresAt!,
+      };
+    }
     const completed = await latestCompletedStep(ctx, command._id);
     const last = await latestStep(ctx, command._id);
     const lastCompletedStepSequence = completed?.sequence ?? 0;
@@ -459,11 +675,19 @@ export const watchActiveRun = internalMutation({
     const runnerLost =
       control.runnerHeartbeatAt === undefined ||
       now - control.runnerHeartbeatAt >= RUNNER_HEARTBEAT_LOSS_MS;
-    const runStartedAt = command.claimedAt ?? command.createdAt;
+    const approvalResumeAt =
+      incident?.currentPhase === "awaiting_approval" &&
+      recovery?.approvalStatus === "approved"
+        ? recovery.approvalDecidedAt
+        : undefined;
+    const runStartedAt =
+      approvalResumeAt ?? command.claimedAt ?? command.createdAt;
     const runDeadlineReached =
       now - runStartedAt >= ACTIVE_RUN_DEADLINE_MS;
-    const lastProgressAt =
-      last?.finishedAt ?? last?.startedAt ?? command.claimedAt ?? command.createdAt;
+    const lastProgressAt = Math.max(
+      last?.finishedAt ?? last?.startedAt ?? 0,
+      approvalResumeAt ?? command.claimedAt ?? command.createdAt,
+    );
     const stepDeadlineReached =
       now - lastProgressAt >= ACTIVE_STEP_DEADLINE_MS;
 
@@ -516,7 +740,26 @@ export const heartbeat = mutation({
         runnerHeartbeatAt: now,
       });
     } else {
-      await cleanExpiredActiveRun(ctx, control, now);
+      const cleaned = await cleanExpiredActiveRun(ctx, control, now);
+      if (!cleaned && control.activeDemoCommandId && control.activeIncidentId) {
+        const [command, incident] = await Promise.all([
+          ctx.db.get(control.activeDemoCommandId),
+          ctx.db.get(control.activeIncidentId),
+        ]);
+        const recovery = incident
+          ? await ctx.db
+              .query("recoveryCommands")
+              .withIndex("by_incident", (q) =>
+                q.eq("incidentId", incident._id),
+              )
+              .unique()
+          : null;
+        if (command && isPendingApprovalState(command, incident, recovery)) {
+          await ctx.db.patch(command._id, {
+            leaseExpiresAt: now + CLAIM_LEASE_MS,
+          });
+        }
+      }
       await ctx.db.patch(control._id, { runnerHeartbeatAt: now });
     }
 
@@ -737,6 +980,7 @@ export const getPendingDemoCommand = query({
       createdAt: command.createdAt,
       expiresAt: command.expiresAt,
       stateVersion: command.stateVersion,
+      executionMode: command.executionMode ?? "autonomous",
     };
   },
 });
@@ -793,6 +1037,7 @@ export const getActiveDemoCommand = query({
       claimedAt: command.claimedAt ?? null,
       leaseExpiresAt: command.leaseExpiresAt ?? null,
       stateVersion: command.stateVersion,
+      executionMode: command.executionMode ?? "autonomous",
       incidentId: control.activeIncidentId ?? null,
       incident: incident
         ? {
@@ -815,6 +1060,10 @@ export const getActiveDemoCommand = query({
             stateVersion: recovery.stateVersion,
             executionNonce: recovery.executionNonce,
             completedAt: recovery.completedAt ?? null,
+            approvalStatus: recovery.approvalStatus ?? null,
+            approvalRequestedAt: recovery.approvalRequestedAt ?? null,
+            approvalExpiresAt: recovery.approvalExpiresAt ?? null,
+            approvalDecidedAt: recovery.approvalDecidedAt ?? null,
             executionEvidence:
               recovery.executionCommandLabel !== undefined &&
               recovery.executionExitCode !== undefined &&
@@ -1354,6 +1603,15 @@ export const createRecoveryCommand = mutation({
       args.executionNonce,
       "execution_nonce",
     );
+    const executionMode = command.executionMode ?? "autonomous";
+    const approvalCapabilityDigest = command.approvalCapabilityDigest;
+    if (
+      executionMode === "approval_required" &&
+      (!approvalCapabilityDigest ||
+        !/^[a-f0-9]{64}$/.test(approvalCapabilityDigest))
+    ) {
+      rejectWithCode("APPROVAL_CAPABILITY_REQUIRED");
+    }
     const replay = await ctx.db
       .query("recoveryCommands")
       .withIndex("by_execution_nonce", (q) =>
@@ -1375,27 +1633,55 @@ export const createRecoveryCommand = mutation({
       return {
         recoveryCommandId: replay._id,
         stateVersion: replay.stateVersion,
+        status: replay.status,
+        approvalStatus: replay.approvalStatus,
+        approvalRequestedAt: replay.approvalRequestedAt,
+        approvalExpiresAt: replay.approvalExpiresAt,
       };
     }
     if (replay || existingForIncident) {
       rejectWithCode("EXECUTION_REPLAY");
     }
 
+    const approvalRequestedAt =
+      executionMode === "approval_required" ? now : undefined;
+    const approvalExpiresAt =
+      approvalRequestedAt === undefined
+        ? undefined
+        : approvalRequestedAt + APPROVAL_WINDOW_MS;
+    const recoveryStatus =
+      executionMode === "approval_required" ? "proposed" : "allowed";
+    const approvalStatus =
+      executionMode === "approval_required" ? ("pending" as const) : undefined;
     const recoveryCommandId = await ctx.db.insert("recoveryCommands", {
       demoCommandId: command._id,
       incidentId: incident._id,
       actionId: DEMO_ACTION_ID,
-      status: "allowed",
+      status: recoveryStatus,
       createdAt: now,
       runnerId: DEMO_RUNNER_ID,
       stateVersion: 0,
       executionNonce,
+      approvalStatus,
+      approvalCapabilityDigest:
+        executionMode === "approval_required"
+          ? approvalCapabilityDigest
+          : undefined,
+      approvalRequestedAt,
+      approvalExpiresAt,
     });
     await ctx.db.patch(command._id, {
       leaseExpiresAt: now + CLAIM_LEASE_MS,
     });
 
-    return { recoveryCommandId, stateVersion: 0 };
+    return {
+      recoveryCommandId,
+      stateVersion: 0,
+      status: recoveryStatus,
+      approvalStatus,
+      approvalRequestedAt,
+      approvalExpiresAt,
+    };
   },
 });
 
@@ -1476,6 +1762,7 @@ export const updateIncidentPhase = mutation({
     if (
       changesPolicyDecision &&
       (incident.currentPhase === "policy_check" ||
+        incident.currentPhase === "awaiting_approval" ||
         incident.currentPhase === "executing" ||
         incident.currentPhase === "verifying")
     ) {
@@ -1500,7 +1787,9 @@ export const updateIncidentPhase = mutation({
       }
     }
 
+    let resultingRecoveryStateVersion: number | undefined;
     if (
+      args.nextPhase === "awaiting_approval" ||
       args.nextPhase === "executing" ||
       args.nextPhase === "verifying"
     ) {
@@ -1529,18 +1818,53 @@ export const updateIncidentPhase = mutation({
         rejectWithCode("STALE_STATE");
       }
 
-      if (args.nextPhase === "executing") {
+      if (args.nextPhase === "awaiting_approval") {
+        if (
+          command.executionMode !== "approval_required" ||
+          !command.approvalCapabilityDigest ||
+          recovery.status !== "proposed" ||
+          recovery.approvalStatus !== "pending" ||
+          recovery.approvalCapabilityDigest !==
+            command.approvalCapabilityDigest ||
+          recovery.approvalRequestedAt === undefined ||
+          recovery.approvalExpiresAt === undefined ||
+          now >= recovery.approvalExpiresAt
+        ) {
+          rejectWithCode("APPROVAL_REQUIRED");
+        }
+        resultingRecoveryStateVersion = recovery.stateVersion;
+      } else if (args.nextPhase === "executing") {
         if (args.executionEvidence !== undefined) {
           rejectWithCode("UNEXPECTED_EXECUTION_EVIDENCE");
         }
-        if (recovery.status !== "allowed") {
-          rejectWithCode("INVALID_RECOVERY_STATE");
+        const executionMode = command.executionMode ?? "autonomous";
+        if (incident.currentPhase === "awaiting_approval") {
+          if (
+            executionMode !== "approval_required" ||
+            recovery.status !== "proposed" ||
+            recovery.approvalStatus !== "approved" ||
+            recovery.approvalDecidedAt === undefined ||
+            recovery.approvalExpiresAt === undefined ||
+            recovery.approvalDecidedAt >= recovery.approvalExpiresAt
+          ) {
+            rejectWithCode("APPROVAL_REQUIRED");
+          }
+        } else if (
+          executionMode !== "autonomous" ||
+          recovery.status !== "allowed"
+        ) {
+          rejectWithCode(
+            executionMode === "approval_required"
+              ? "APPROVAL_REQUIRED"
+              : "INVALID_RECOVERY_STATE",
+          );
         }
         await ctx.db.patch(recovery._id, {
           status: "executing",
           claimedAt: now,
           stateVersion: recovery.stateVersion + 1,
         });
+        resultingRecoveryStateVersion = recovery.stateVersion + 1;
       } else {
         const executionEvidence = args.executionEvidence;
         if (!executionEvidence) {
@@ -1584,6 +1908,7 @@ export const updateIncidentPhase = mutation({
           executionEvidenceNonce: executionNonce,
           stateVersion: recovery.stateVersion + 1,
         });
+        resultingRecoveryStateVersion = recovery.stateVersion + 1;
       }
     }
 
@@ -1645,10 +1970,7 @@ export const updateIncidentPhase = mutation({
 
     return {
       stateVersion,
-      recoveryStateVersion:
-        args.expectedRecoveryStateVersion === undefined
-          ? undefined
-          : args.expectedRecoveryStateVersion + 1,
+      recoveryStateVersion: resultingRecoveryStateVersion,
       recoveryCompletedAt:
         args.nextPhase === "verifying" ? now : undefined,
       leaseExpiresAt: now + CLAIM_LEASE_MS,
@@ -1859,9 +2181,6 @@ export const completeIncident = mutation({
       await ctx.db.patch(control._id, {
         activeDemoCommandId: undefined,
         activeIncidentId: undefined,
-        lastRequestedAt: needsEnvironmentRecovery
-          ? undefined
-          : control.lastRequestedAt,
         environmentRecoveryIncidentId: needsEnvironmentRecovery
           ? incident._id
           : undefined,
