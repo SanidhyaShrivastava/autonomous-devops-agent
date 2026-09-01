@@ -6,6 +6,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const convexMock = vi.hoisted(() => ({
   mutate: vi.fn(),
+  useConvexAuth: vi.fn(),
   useMutation: vi.fn(),
   useQuery: vi.fn(),
 }));
@@ -13,6 +14,7 @@ const authMock = vi.hoisted(() => ({ signOut: vi.fn() }));
 const routerMock = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
 
 vi.mock("convex/react", () => ({
+  useConvexAuth: convexMock.useConvexAuth,
   useMutation: convexMock.useMutation,
   useQuery: convexMock.useQuery,
 }));
@@ -38,6 +40,11 @@ describe("server onboarding", () => {
     convexMock.useMutation.mockReturnValue(convexMock.mutate);
     convexMock.useQuery.mockReset();
     convexMock.useQuery.mockReturnValue(privateState());
+    convexMock.useConvexAuth.mockReset();
+    convexMock.useConvexAuth.mockReturnValue({
+      isAuthenticated: true,
+      isLoading: false,
+    });
     authMock.signOut.mockReset();
     routerMock.push.mockReset();
     routerMock.refresh.mockReset();
@@ -139,5 +146,22 @@ describe("server onboarding", () => {
     expect(screen.getByText("Online")).toBeInTheDocument();
     expect(screen.getByText(/No logs, services, or commands are available/i)).toBeInTheDocument();
     expect(screen.getByText("No recovery actions enabled")).toBeInTheDocument();
+  });
+
+  it("stops the private query before removing authentication on sign out", async () => {
+    render(<ServerOnboarding />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Sign out" }));
+
+    await waitFor(() => expect(authMock.signOut).toHaveBeenCalledOnce());
+    const skippedQueryIndex = convexMock.useQuery.mock.calls.findIndex(
+      ([, args]) => args === "skip",
+    );
+    expect(skippedQueryIndex).toBeGreaterThanOrEqual(0);
+    expect(
+      convexMock.useQuery.mock.invocationCallOrder[skippedQueryIndex],
+    ).toBeLessThan(authMock.signOut.mock.invocationCallOrder[0]);
+    expect(routerMock.push).toHaveBeenCalledWith("/");
+    expect(routerMock.refresh).toHaveBeenCalledOnce();
   });
 });

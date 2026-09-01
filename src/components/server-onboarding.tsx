@@ -1,7 +1,7 @@
 "use client";
 
 import { useAuthActions } from "@convex-dev/auth/react";
-import { useMutation, useQuery } from "convex/react";
+import { useConvexAuth, useMutation, useQuery } from "convex/react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
 import {
@@ -41,7 +41,12 @@ async function sha256(value: string) {
 }
 
 export function ServerOnboarding() {
-  const state = useQuery(api.runners.listMine);
+  const { isAuthenticated } = useConvexAuth();
+  const [isSigningOut, setIsSigningOut] = useState(false);
+  const state = useQuery(
+    api.runners.listMine,
+    isAuthenticated && !isSigningOut ? {} : "skip",
+  );
   const createEnrollment = useMutation(api.runners.createEnrollment);
   const revokeRunner = useMutation(api.runners.revoke);
   const { signOut } = useAuthActions();
@@ -55,6 +60,7 @@ export function ServerOnboarding() {
   const [notice, setNotice] = useState<string | null>(null);
   const [clock, setClock] = useState(() => Date.now());
   const stateHeadingRef = useRef<HTMLHeadingElement>(null);
+  const signOutStartedRef = useRef(false);
 
   const runner = state?.runner ?? null;
   const activeRunner = runner && runner.revokedAt === null ? runner : null;
@@ -79,6 +85,22 @@ export function ServerOnboarding() {
       stateHeadingRef.current?.focus();
     }
   }, [activeRunner, issuedCode, showReplacementForm]);
+
+  useEffect(() => {
+    if (!isSigningOut || signOutStartedRef.current) return;
+    signOutStartedRef.current = true;
+    void (async () => {
+      try {
+        await signOut();
+        router.push("/");
+        router.refresh();
+      } catch {
+        signOutStartedRef.current = false;
+        setIsSigningOut(false);
+        setNotice("Sign out failed. Your private runner page is still open.");
+      }
+    })();
+  }, [isSigningOut, router, signOut]);
 
   async function handleCreate(event: FormEvent<HTMLFormElement>) {
     event.preventDefault();
@@ -127,10 +149,8 @@ export function ServerOnboarding() {
     }
   }
 
-  async function handleSignOut() {
-    await signOut();
-    router.push("/");
-    router.refresh();
+  function handleSignOut() {
+    setIsSigningOut(true);
   }
 
   return (
@@ -142,8 +162,13 @@ export function ServerOnboarding() {
             <small>Runner onboarding</small>
           </span>
         </Link>
-        <button className="quiet-action" onClick={handleSignOut} type="button">
-          Sign out
+        <button
+          className="quiet-action"
+          disabled={isSigningOut}
+          onClick={handleSignOut}
+          type="button"
+        >
+          {isSigningOut ? "Signing out…" : "Sign out"}
         </button>
       </header>
 
