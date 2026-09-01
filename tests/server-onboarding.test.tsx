@@ -263,6 +263,10 @@ describe("server onboarding", () => {
       expect(mutationMocks.registerFixedWorkload).toHaveBeenCalledOnce(),
     );
     expect(mutationMocks.registerFixedWorkload).toHaveBeenCalledWith({});
+    expect(screen.getByText("Disposable service registered.")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Disposable service registered.*waiting/i),
+    ).not.toBeInTheDocument();
   });
 
   it("does not register when the exact capability report is stale", () => {
@@ -437,6 +441,10 @@ describe("server onboarding", () => {
     expect(screen.getByRole("button", { name: "Approving…" })).toBeDisabled();
 
     await act(async () => finishMutation?.());
+    expect(screen.getByText("Fixed restart approved.")).toBeInTheDocument();
+    expect(
+      screen.queryByText(/Fixed restart approved.*waiting/i),
+    ).not.toBeInTheDocument();
   });
 
   it("blocks approval when the runner is stale but still allows rejection", () => {
@@ -706,6 +714,7 @@ describe("server onboarding", () => {
           lastHealthyInstanceId: "instance-after-recovery",
         }),
         latestRecovery: fixedRecovery("succeeded", {
+          approvedAt: Date.now() - 1_500,
           preActionInstanceId: "instance-before-recovery",
           executionResultCode: "restart_succeeded",
           verificationStatus: "healthy",
@@ -734,6 +743,11 @@ describe("server onboarding", () => {
         screen.getByRole("region", { name: "Connect one Linux runner" }),
       ).getByText(/fixed policy recovery/i),
     ).toBeInTheDocument();
+    const recoveryRail = screen.getByRole("list", {
+      name: "Recovery authority path",
+    });
+    expect(within(recoveryRail).getByText("Always required")).toBeInTheDocument();
+    expect(within(recoveryRail).queryByText("Approved")).not.toBeInTheDocument();
   });
 
   it("does not show verified when the post-restart instance did not change", () => {

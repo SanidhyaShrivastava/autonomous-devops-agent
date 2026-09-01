@@ -204,6 +204,11 @@ export function ServerOnboarding() {
       workload?.healthStatus === "healthy" &&
       workload.currentInstanceId === latestRecovery.postActionInstanceId,
   );
+  const previousSuccessSuperseded = Boolean(
+    latestRecovery?.status === "succeeded" &&
+      healthFresh &&
+      workload?.healthStatus === "unhealthy",
+  );
   const recoveryFocusKey = workload
     ? `${workload.workloadId}:${workload.healthStatus}:${latestRecovery?.status ?? "none"}`
     : null;
@@ -393,7 +398,7 @@ export function ServerOnboarding() {
     void runOwnerOperation(
       "register",
       () => registerFixedWorkload({}),
-      "Disposable service registered. Waiting for its first fresh health check.",
+      "Disposable service registered.",
       "The service could not be registered. Keep the runner online and try again.",
     );
   }
@@ -439,7 +444,7 @@ export function ServerOnboarding() {
           decision,
         }),
       approving
-        ? "Fixed restart approved. Waiting for the runner to claim it."
+        ? "Fixed restart approved."
         : "Recovery rejected. No restart was authorized.",
       approving
         ? "Approval failed. No restart was authorized."
@@ -541,7 +546,7 @@ export function ServerOnboarding() {
           <small>
             {latestRecovery?.status === "pending_approval"
               ? "Owner decision needed"
-              : latestRecovery?.approvedAt
+              : latestRecovery?.approvedAt && !previousSuccessSuperseded
                 ? "Approved"
                 : "Always required"}
           </small>
