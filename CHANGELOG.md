@@ -15,3 +15,4 @@
 - A visitor now sees a server-persisted failed result within seconds if the trusted coordinator disappears; the failure survives reload, the returning coordinator restores the disposable service automatically, and a fresh run can complete normally.
 - A visitor can now watch the same nine-step recovery run through an authenticated, unprivileged Linux sandbox agent with truthful Linux operation labels and no host mounts or Docker socket.
 - A visitor can now choose automatic recovery or pause the same fixed restart for a durable browser approve/reject decision, while other browsers remain read-only and rejection restores the disposable service without executing recovery.
+- A visitor can now take time to review an approval request and still complete the restart and fresh verification without the earlier run timer expiring during that human wait.

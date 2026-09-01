@@ -99,9 +99,9 @@
 - Modify: `CHANGELOG.md`
 - Modify: `/Users/sanidhya/Downloads/GrowthX/IDEA_SCOPE.md`
 
-- [ ] Run `npm test`, typecheck, lint, build, eval, sandbox proof, preflight, and `git diff --check`.
-- [ ] Locally verify autonomous success remains nine steps.
-- [ ] Locally verify approval pause survives reload, a spectator cannot decide, approval resumes to verified healthy, rejection runs no recovery, and restoration completes.
-- [ ] Verify 1440px and 390px with no horizontal overflow or browser errors.
-- [ ] Push to GitHub, wait for the production Vercel/Convex deployment, restart exactly one compatible runner, and repeat the public checks.
-- [ ] Record only verified evidence in `IDEA_SCOPE.md` and one user-visible line in `CHANGELOG.md`.
+- [x] Run `npm test`, typecheck, lint, build, eval, sandbox proof, preflight, and `git diff --check`.
+- [x] Locally verify autonomous success remains nine steps.
+- [x] Locally verify approval pause survives reload, a spectator cannot decide, approval resumes to verified healthy, rejection runs no recovery, and restoration completes.
+- [x] Verify 1440px and 390px with no horizontal overflow or browser errors.
+- [x] Push to GitHub, wait for the production Vercel/Convex deployment, restart exactly one compatible runner, and repeat the public checks.
+- [x] Record only verified evidence in `IDEA_SCOPE.md` and one user-visible line in `CHANGELOG.md`.
