@@ -3,6 +3,7 @@
 import { ConvexHttpClient } from "convex/browser";
 import { useQuery } from "convex/react";
 import type { FunctionReturnType } from "convex/server";
+import Link from "next/link";
 import { useEffect, useState, useTransition } from "react";
 
 import { api } from "../../convex/_generated/api";
@@ -650,11 +651,16 @@ export function DemoDashboard() {
     <div className="dashboard-shell">
       <header className="console-header">
         <div className="console-intro">
-          <div className="product-mark" aria-label="Autonomous DevOps Agent">
-            <span>
-              <strong>Autonomous DevOps Agent</strong>
-              <small>Live recovery console</small>
-            </span>
+          <div className="console-entry-row">
+            <div className="product-mark" aria-label="Autonomous DevOps Agent">
+              <span>
+                <strong>Autonomous DevOps Agent</strong>
+                <small>Live recovery console</small>
+              </span>
+            </div>
+            <Link className="connect-runner-link" href="/servers/new">
+              Connect your Linux server <span aria-hidden="true">→</span>
+            </Link>
           </div>
 
           <div className="headline-block">

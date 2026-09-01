@@ -114,6 +114,37 @@ button {
   text-transform: uppercase;
 }
 
+.console-entry-row,
+.onboarding-topbar {
+  display: flex;
+  align-items: center;
+  justify-content: space-between;
+  gap: 20px;
+}
+
+.connect-runner-link,
+.auth-back-link {
+  color: var(--telemetry-soft);
+  font-family: var(--font-evidence), monospace;
+  font-size: 11px;
+  text-decoration: none;
+}
+
+.connect-runner-link:hover,
+.auth-back-link:hover {
+  color: var(--signal-blue-strong);
+}
+
+.connect-runner-link:focus-visible,
+.auth-back-link:focus-visible,
+.quiet-action:focus-visible,
+.auth-flow-toggle:focus-visible,
+.copy-action:focus-visible,
+.danger-outline-action:focus-visible {
+  outline: 3px solid var(--telemetry-ink);
+  outline-offset: 3px;
+}
+
 .headline-block {
   max-width: 880px;
 }
@@ -320,6 +351,417 @@ button {
   clip: rect(0 0 0 0);
   clip-path: inset(50%);
   white-space: nowrap;
+}
+
+.auth-canvas {
+  display: grid;
+  place-items: center;
+  padding: 24px;
+}
+
+.auth-shell {
+  width: min(100%, 560px);
+  border: 1px solid var(--console-line);
+  padding: clamp(24px, 5vw, 48px);
+  background: var(--console-panel);
+}
+
+.auth-shell h1,
+.onboarding-hero h1 {
+  margin: 14px 0 0;
+  font-size: clamp(30px, 5vw, 52px);
+  font-weight: 540;
+  letter-spacing: -0.045em;
+  line-height: 1.06;
+  text-wrap: balance;
+}
+
+.auth-intro,
+.onboarding-hero > p:last-child,
+.onboarding-state > p,
+.onboarding-policy > p {
+  color: var(--telemetry-soft);
+  font-size: 14px;
+  line-height: 1.65;
+  text-wrap: pretty;
+}
+
+.auth-form,
+.onboarding-form {
+  display: grid;
+  gap: 12px;
+  margin-top: 28px;
+}
+
+.auth-form label,
+.onboarding-form > label:not(.permission-check) {
+  color: var(--telemetry-soft);
+  font-family: var(--font-evidence), monospace;
+  font-size: 11px;
+  font-weight: 650;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+}
+
+.auth-form input,
+.onboarding-form > input {
+  min-height: 48px;
+  border: 1px solid var(--console-line-strong);
+  border-radius: 6px;
+  padding: 0 14px;
+  background: var(--console-inset);
+  color: var(--telemetry-ink);
+  font-size: 14px;
+}
+
+.auth-form input:focus-visible,
+.onboarding-form > input:focus-visible,
+.permission-check input:focus-visible {
+  outline: 3px solid var(--signal-blue);
+  outline-offset: 2px;
+}
+
+.primary-action,
+.copy-action,
+.danger-outline-action,
+.quiet-action,
+.auth-flow-toggle {
+  min-height: 48px;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 13px;
+  font-weight: 700;
+  transition:
+    background-color 150ms ease,
+    border-color 150ms ease,
+    color 150ms ease,
+    transform 150ms ease;
+}
+
+.primary-action {
+  border: 1px solid var(--signal-blue);
+  padding: 0 16px;
+  background: var(--signal-blue);
+  color: #081027;
+}
+
+.primary-action:hover:not(:disabled),
+.copy-action:hover:not(:disabled) {
+  border-color: var(--signal-blue-strong);
+  background: var(--signal-blue-strong);
+  transform: translateY(-1px);
+}
+
+.primary-action:focus-visible {
+  outline: 3px solid var(--telemetry-ink);
+  outline-offset: 3px;
+}
+
+.primary-action:disabled,
+.copy-action:disabled,
+.danger-outline-action:disabled,
+.quiet-action:disabled,
+.auth-flow-toggle:disabled {
+  cursor: not-allowed;
+  opacity: 0.55;
+}
+
+.auth-flow-toggle,
+.quiet-action {
+  border: 0;
+  padding: 0 10px;
+  background: transparent;
+  color: var(--telemetry-muted);
+}
+
+.auth-flow-toggle:hover,
+.quiet-action:hover {
+  color: var(--telemetry-ink);
+}
+
+.auth-error,
+.auth-boundary,
+.live-notice {
+  color: var(--status-warning);
+  font-family: var(--font-evidence), monospace;
+  font-size: 11px;
+  line-height: 1.55;
+}
+
+.auth-boundary {
+  margin: 24px 0 0;
+  border-top: 1px solid var(--console-line);
+  padding-top: 18px;
+  color: var(--telemetry-muted);
+}
+
+.onboarding-shell {
+  width: min(100%, 1180px);
+  margin: 0 auto;
+  padding: 24px clamp(20px, 4vw, 52px) 64px;
+}
+
+.onboarding-topbar {
+  border-bottom: 1px solid var(--console-line);
+  padding: 12px 0 24px;
+}
+
+.onboarding-topbar .product-mark {
+  text-decoration: none;
+}
+
+.onboarding-hero {
+  max-width: 760px;
+  padding: clamp(42px, 8vw, 88px) 0 32px;
+}
+
+.onboarding-hero > p:last-child {
+  max-width: 680px;
+  margin: 18px 0 0;
+}
+
+.connection-rail {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) auto minmax(0, 1fr) auto minmax(0, 1fr);
+  align-items: stretch;
+  margin: 0;
+  border-top: 1px solid var(--console-line);
+  border-bottom: 1px solid var(--console-line);
+  padding: 0;
+  list-style: none;
+}
+
+.connection-node {
+  display: grid;
+  min-width: 0;
+  gap: 5px;
+  padding: 18px 16px;
+}
+
+.connection-node span,
+.connection-node small,
+.connection-line {
+  color: var(--telemetry-muted);
+  font-family: var(--font-evidence), monospace;
+  font-size: 10px;
+}
+
+.connection-node strong {
+  font-size: 14px;
+  font-weight: 620;
+}
+
+.connection-node-active span,
+.connection-node-online span,
+.connection-node-online small {
+  color: var(--status-success);
+}
+
+.connection-line {
+  align-self: center;
+}
+
+.onboarding-grid {
+  display: grid;
+  grid-template-columns: minmax(0, 1.35fr) minmax(300px, 0.65fr);
+  border-bottom: 1px solid var(--console-line);
+}
+
+.onboarding-panel,
+.onboarding-policy {
+  min-width: 0;
+  padding: clamp(24px, 5vw, 52px);
+}
+
+.onboarding-panel {
+  border-left: 1px solid var(--console-line);
+}
+
+.onboarding-policy {
+  border-right: 1px solid var(--console-line);
+  border-left: 1px solid var(--console-line);
+  background: var(--console-panel);
+}
+
+.onboarding-state h2,
+.onboarding-form h2,
+.onboarding-policy h2 {
+  margin: 10px 0 0;
+  font-size: clamp(22px, 3vw, 32px);
+  font-weight: 560;
+  letter-spacing: -0.03em;
+}
+
+.onboarding-state h2:focus,
+.onboarding-form h2:focus {
+  outline: none;
+}
+
+.onboarding-state .system-badge {
+  margin-top: 18px;
+}
+
+.runner-facts,
+.onboarding-policy dl {
+  margin: 24px 0 0;
+  border-top: 1px solid var(--console-line);
+}
+
+.runner-facts div,
+.onboarding-policy dl div {
+  display: grid;
+  grid-template-columns: minmax(100px, 0.7fr) minmax(0, 1.3fr);
+  gap: 18px;
+  border-bottom: 1px solid var(--console-line);
+  padding: 13px 0;
+}
+
+.runner-facts dt,
+.onboarding-policy dt {
+  color: var(--telemetry-muted);
+  font-family: var(--font-evidence), monospace;
+  font-size: 10px;
+  text-transform: uppercase;
+}
+
+.runner-facts dd,
+.onboarding-policy dd {
+  min-width: 0;
+  margin: 0;
+  color: var(--telemetry-soft);
+  font-size: 12px;
+  overflow-wrap: anywhere;
+}
+
+.policy-warning {
+  color: var(--status-warning) !important;
+}
+
+.onboarding-boundary-copy {
+  border-left: 2px solid var(--status-success);
+  padding-left: 14px;
+}
+
+.field-help {
+  margin: -4px 0 0;
+  color: var(--telemetry-muted);
+  font-size: 12px;
+  line-height: 1.55;
+}
+
+.permission-check {
+  display: flex;
+  align-items: flex-start;
+  gap: 12px;
+  margin: 8px 0;
+  color: var(--telemetry-soft);
+  font-size: 13px;
+  line-height: 1.5;
+}
+
+.permission-check input {
+  width: 18px;
+  height: 18px;
+  flex: 0 0 auto;
+  margin: 1px 0 0;
+  accent-color: var(--signal-blue);
+}
+
+.pairing-code-block {
+  display: grid;
+  gap: 12px;
+  margin-top: 24px;
+  border: 1px solid var(--console-line-strong);
+  padding: 16px;
+  background: var(--console-inset);
+}
+
+.pairing-code-block > span {
+  color: var(--telemetry-muted);
+  font-family: var(--font-evidence), monospace;
+  font-size: 9px;
+  letter-spacing: 0.1em;
+}
+
+.pairing-code-block code {
+  display: block;
+  overflow-x: auto;
+  color: var(--signal-blue-strong);
+  font-family: var(--font-evidence), monospace;
+  font-size: 12px;
+  white-space: nowrap;
+}
+
+.copy-action {
+  border: 1px solid var(--signal-blue);
+  padding: 0 14px;
+  background: var(--signal-blue-surface);
+  color: var(--signal-blue-strong);
+}
+
+.server-steps {
+  display: grid;
+  gap: 0;
+  margin: 24px 0 0;
+  padding: 0;
+  list-style: none;
+}
+
+.server-steps li {
+  display: grid;
+  grid-template-columns: 30px minmax(0, 1fr);
+  gap: 12px;
+  border-top: 1px solid var(--console-line);
+  padding: 14px 0;
+}
+
+.server-steps li > span {
+  color: var(--signal-blue-strong);
+  font-family: var(--font-evidence), monospace;
+  font-size: 10px;
+}
+
+.server-steps li > div {
+  display: grid;
+  min-width: 0;
+  gap: 8px;
+}
+
+.server-steps strong {
+  font-size: 13px;
+}
+
+.server-steps code {
+  overflow-x: auto;
+  color: var(--telemetry-muted);
+  font-family: var(--font-evidence), monospace;
+  font-size: 10px;
+  white-space: nowrap;
+}
+
+.waiting-heartbeat {
+  display: flex;
+  align-items: center;
+  gap: 9px;
+  color: var(--status-warning) !important;
+  font-family: var(--font-evidence), monospace;
+  font-size: 11px !important;
+}
+
+.danger-outline-action {
+  border: 1px solid var(--status-danger);
+  padding: 0 14px;
+  background: transparent;
+  color: var(--status-danger);
+}
+
+.danger-outline-action:hover:not(:disabled) {
+  background: var(--status-danger-surface);
+}
+
+.live-notice {
+  min-height: 18px;
+  margin: 18px 0 0;
 }
 
 .recovery-rail {
@@ -1123,11 +1565,65 @@ button {
   .resolution-panel {
     position: static;
   }
+
+  .onboarding-grid {
+    grid-template-columns: 1fr;
+  }
+
+  .onboarding-policy {
+    border-top: 1px solid var(--console-line);
+  }
 }
 
 @media (max-width: 620px) {
   .dashboard-shell {
     padding: 12px 14px 40px;
+  }
+
+  .console-entry-row,
+  .onboarding-topbar {
+    align-items: flex-start;
+    flex-direction: column;
+  }
+
+  .onboarding-shell {
+    padding: 12px 14px 40px;
+  }
+
+  .onboarding-hero {
+    padding: 42px 0 24px;
+  }
+
+  .connection-rail {
+    grid-template-columns: 1fr;
+  }
+
+  .connection-line {
+    display: none;
+  }
+
+  .connection-node {
+    grid-template-columns: 28px minmax(0, 1fr);
+    padding: 12px 0;
+  }
+
+  .connection-node small {
+    grid-column: 2;
+  }
+
+  .onboarding-panel,
+  .onboarding-policy {
+    padding: 24px 14px;
+  }
+
+  .runner-facts div,
+  .onboarding-policy dl div {
+    grid-template-columns: 1fr;
+    gap: 6px;
+  }
+
+  .pairing-code-block {
+    padding: 14px;
   }
 
   .console-header {

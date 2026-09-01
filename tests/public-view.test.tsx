@@ -360,6 +360,9 @@ describe("public recovery dashboard", () => {
     expect(approvalButton).toBeEnabled();
     expect(screen.getByText("Verification pending")).toBeInTheDocument();
     expect(screen.queryByText("AD")).not.toBeInTheDocument();
+    expect(
+      screen.getByRole("link", { name: "Connect your Linux server" }),
+    ).toHaveAttribute("href", "/servers/new");
   });
 
   it("posts an empty reset request and announces acceptance", async () => {
