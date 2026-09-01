@@ -1205,6 +1205,38 @@ describe("public recovery dashboard", () => {
     ).not.toBeInTheDocument();
   });
 
+  it("rechecks the starting browser when the approval phase opens after an early read-only response", async () => {
+    let currentState = pendingApprovalState({
+      incident: incident("policy_check"),
+    });
+    convexMock.useQuery.mockImplementation(() => currentState);
+    const fetchMock = vi.mocked(fetch);
+    fetchMock
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ canDecide: false }), { status: 200 }),
+      )
+      .mockResolvedValueOnce(
+        new Response(JSON.stringify({ canDecide: true }), { status: 200 }),
+      );
+
+    const view = render(<DemoDashboard />);
+
+    expect(
+      await screen.findByRole("heading", {
+        name: "Waiting for the initiating browser",
+      }),
+    ).toBeInTheDocument();
+    expect(fetchMock).toHaveBeenCalledTimes(1);
+
+    currentState = pendingApprovalState();
+    view.rerender(<DemoDashboard />);
+
+    expect(
+      await screen.findByRole("button", { name: "Approve staged restart" }),
+    ).toBeEnabled();
+    expect(fetchMock).toHaveBeenCalledTimes(2);
+  });
+
   it("marks the pending approval checkpoint as the current timeline step", () => {
     convexMock.useQuery.mockReturnValue(pendingApprovalState());
     vi.mocked(fetch).mockResolvedValue(

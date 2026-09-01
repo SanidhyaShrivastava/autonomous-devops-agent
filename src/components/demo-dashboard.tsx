@@ -322,7 +322,7 @@ export function DemoDashboard() {
     : "loading";
   const pendingApprovalKey =
     state?.demoCommandId && state.approval?.status === "pending"
-      ? `${state.demoCommandId}:${state.approval.requestedAt}`
+      ? `${state.demoCommandId}:${state.approval.requestedAt}:${state.incident?.currentPhase ?? "no_incident"}`
       : null;
   const approvalSessionStatus: ApprovalSessionStatus =
     pendingApprovalKey && approvalSession?.key === pendingApprovalKey
