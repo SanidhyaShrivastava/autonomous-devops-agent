@@ -2294,6 +2294,49 @@ describe("durable staged approval gate", () => {
     ]);
   });
 
+  it("starts a fresh run deadline after a delayed approval enters execution", async () => {
+    const t = createHarness();
+    const pending = await createPendingApproval(t);
+
+    vi.setSystemTime(BASE_TIME + 100_000);
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    await t.mutation(decideApproval, {
+      requestSecret: DEMO_SECRET,
+      approvalCapabilityDigest: APPROVAL_CAPABILITY_DIGEST,
+      decision: "approved",
+    });
+    await t.mutation(updateIncidentPhase, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+      demoCommandId: pending.demoCommandId,
+      incidentId: pending.incident.incidentId,
+      expectedPhase: "awaiting_approval",
+      nextPhase: "executing",
+      expectedStateVersion: pending.awaiting.stateVersion,
+      expectedCommandStateVersion: pending.commandStateVersion,
+      recoveryCommandId: pending.recovery.recoveryCommandId,
+      expectedRecoveryStateVersion: 1,
+      executionNonce: pending.executionNonce,
+    });
+
+    vi.setSystemTime(BASE_TIME + 101_000);
+    await t.mutation(heartbeat, {
+      runnerToken: RUNNER_TOKEN,
+      runnerId: RUNNER_ID,
+    });
+    vi.setSystemTime(BASE_TIME + 102_000);
+
+    await expect(t.mutation(watchActiveRun, {})).resolves.toEqual({
+      status: "active",
+    });
+    expect(await tableRows(t, "incidents")).toEqual([
+      expect.objectContaining({ currentPhase: "executing" }),
+    ]);
+  });
+
   it("fails a pending approval visibly when two runner heartbeats are missed", async () => {
     const t = createHarness();
     await createPendingApproval(t);

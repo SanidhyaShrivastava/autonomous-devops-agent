@@ -676,7 +676,7 @@ export const watchActiveRun = internalMutation({
       control.runnerHeartbeatAt === undefined ||
       now - control.runnerHeartbeatAt >= RUNNER_HEARTBEAT_LOSS_MS;
     const approvalResumeAt =
-      incident?.currentPhase === "awaiting_approval" &&
+      command.executionMode === "approval_required" &&
       recovery?.approvalStatus === "approved"
         ? recovery.approvalDecidedAt
         : undefined;
