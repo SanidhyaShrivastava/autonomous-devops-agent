@@ -9,8 +9,9 @@ import {
   saveRunnerConfig,
   type RunnerConfig,
 } from "./config";
+import { HOST_AGENT_VERSION } from "./version";
 
-export const HOST_AGENT_VERSION = "0.1.0";
+export { HOST_AGENT_VERSION } from "./version";
 
 const pairResponseSchema = z
   .object({

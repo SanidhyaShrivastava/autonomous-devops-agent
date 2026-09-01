@@ -14,6 +14,7 @@
     "runner:start": "tsx runner/index.ts",
     "host:pair": "tsx host-agent/pair.ts",
     "host:connect": "tsx host-agent/connect.ts",
+    "host:seed-failure": "tsx host-agent/seed-failure.ts",
     "demo:build": "docker buildx build --pull --load --tag gx-autodevops-linux-sandbox:m2 --file linux-sandbox/Dockerfile linux-sandbox",
     "demo:start": "tsx scripts/linux-sandbox-start.ts",
     "demo:preflight": "tsx scripts/demo-service-preflight.ts",
