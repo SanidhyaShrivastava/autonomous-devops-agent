@@ -12,13 +12,20 @@ import {
   waitFor,
   within,
 } from "@testing-library/react";
+import { getFunctionName } from "convex/server";
 import { afterEach, beforeEach, describe, expect, it, vi } from "vitest";
 
 const convexMock = vi.hoisted(() => ({
-  mutate: vi.fn(),
   useConvexAuth: vi.fn(),
   useMutation: vi.fn(),
   useQuery: vi.fn(),
+}));
+const mutationMocks = vi.hoisted(() => ({
+  createEnrollment: vi.fn(),
+  revoke: vi.fn(),
+  registerFixedWorkload: vi.fn(),
+  requestFixedRecovery: vi.fn(),
+  decideFixedRecovery: vi.fn(),
 }));
 const authMock = vi.hoisted(() => ({ signOut: vi.fn() }));
 const routerMock = vi.hoisted(() => ({ push: vi.fn(), refresh: vi.fn() }));
@@ -103,13 +110,30 @@ function fixedRecovery(
 
 describe("server onboarding", () => {
   beforeEach(() => {
-    convexMock.mutate.mockReset();
-    convexMock.mutate.mockResolvedValue({
+    for (const mutation of Object.values(mutationMocks)) {
+      mutation.mockReset();
+      mutation.mockResolvedValue({});
+    }
+    mutationMocks.createEnrollment.mockResolvedValue({
       enrollmentId: "invite-1",
       expiresAt: Date.now() + 10 * 60_000,
     });
     convexMock.useMutation.mockReset();
-    convexMock.useMutation.mockReturnValue(convexMock.mutate);
+    convexMock.useMutation.mockImplementation((reference) => {
+      const functionName = getFunctionName(reference);
+      const mutationByName = {
+        "runners:createEnrollment": mutationMocks.createEnrollment,
+        "runners:revoke": mutationMocks.revoke,
+        "runners:registerFixedWorkload": mutationMocks.registerFixedWorkload,
+        "runners:requestFixedRecovery": mutationMocks.requestFixedRecovery,
+        "runners:decideFixedRecovery": mutationMocks.decideFixedRecovery,
+      }[functionName];
+
+      if (!mutationByName) {
+        throw new Error(`Unexpected mutation: ${functionName}`);
+      }
+      return mutationByName;
+    });
     convexMock.useQuery.mockReset();
     convexMock.useQuery.mockReturnValue(privateState());
     convexMock.useConvexAuth.mockReset();
@@ -164,8 +188,10 @@ describe("server onboarding", () => {
     );
     fireEvent.click(screen.getByRole("button", { name: "Create pairing code" }));
 
-    await waitFor(() => expect(convexMock.mutate).toHaveBeenCalledOnce());
-    expect(convexMock.mutate).toHaveBeenCalledWith({
+    await waitFor(() =>
+      expect(mutationMocks.createEnrollment).toHaveBeenCalledOnce(),
+    );
+    expect(mutationMocks.createEnrollment).toHaveBeenCalledWith({
       codeDigest: "02".repeat(32),
       label: "staging-web-1",
     });
@@ -233,8 +259,10 @@ describe("server onboarding", () => {
     fireEvent.click(
       screen.getByRole("button", { name: "Register disposable service" }),
     );
-    await waitFor(() => expect(convexMock.mutate).toHaveBeenCalledOnce());
-    expect(convexMock.mutate).toHaveBeenCalledWith({});
+    await waitFor(() =>
+      expect(mutationMocks.registerFixedWorkload).toHaveBeenCalledOnce(),
+    );
+    expect(mutationMocks.registerFixedWorkload).toHaveBeenCalledWith({});
   });
 
   it("does not register when the exact capability report is stale", () => {
@@ -252,6 +280,9 @@ describe("server onboarding", () => {
       screen.queryByRole("button", { name: "Register disposable service" }),
     ).not.toBeInTheDocument();
     expect(screen.getByText(/waiting for the fixed service capability/i)).toBeInTheDocument();
+    expect(
+      screen.getByRole("status", { name: "Recovery safety status" }),
+    ).toHaveTextContent(/fixed recovery capability is stale/i);
   });
 
   it("shows one fixed check, one fixed action, approval-first policy, and the authority rail", () => {
@@ -322,11 +353,17 @@ describe("server onboarding", () => {
     expect(
       screen.queryByRole("button", { name: "Prepare approval-first recovery" }),
     ).not.toBeInTheDocument();
+
+    if (status === "Waiting for fresh health") {
+      expect(
+        screen.getByRole("status", { name: "Recovery safety status" }),
+      ).toHaveTextContent(/health report is stale/i);
+    }
   });
 
   it("prepares one approval-first request for a fresh unhealthy service", async () => {
     let finishMutation: (() => void) | undefined;
-    convexMock.mutate.mockImplementation(
+    mutationMocks.requestFixedRecovery.mockImplementation(
       () => new Promise((resolve) => {
         finishMutation = () => resolve({});
       }),
@@ -353,8 +390,8 @@ describe("server onboarding", () => {
     fireEvent.click(prepare);
     fireEvent.click(prepare);
 
-    expect(convexMock.mutate).toHaveBeenCalledOnce();
-    expect(convexMock.mutate).toHaveBeenCalledWith({});
+    expect(mutationMocks.requestFixedRecovery).toHaveBeenCalledOnce();
+    expect(mutationMocks.requestFixedRecovery).toHaveBeenCalledWith({});
     expect(
       screen.getByRole("button", { name: "Preparing recovery…" }),
     ).toBeDisabled();
@@ -364,7 +401,7 @@ describe("server onboarding", () => {
 
   it("names the fixed restart and accepts only one pending approval decision", async () => {
     let finishMutation: (() => void) | undefined;
-    convexMock.mutate.mockImplementation(
+    mutationMocks.decideFixedRecovery.mockImplementation(
       () => new Promise((resolve) => {
         finishMutation = () => resolve({});
       }),
@@ -392,8 +429,8 @@ describe("server onboarding", () => {
     fireEvent.click(approve);
     fireEvent.click(approve);
 
-    expect(convexMock.mutate).toHaveBeenCalledOnce();
-    expect(convexMock.mutate).toHaveBeenCalledWith({
+    expect(mutationMocks.decideFixedRecovery).toHaveBeenCalledOnce();
+    expect(mutationMocks.decideFixedRecovery).toHaveBeenCalledWith({
       commandId: "recovery_abcdefghijklmnop",
       decision: "approved",
     });
@@ -458,6 +495,179 @@ describe("server onboarding", () => {
     ).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: "Reject" })).not.toBeInTheDocument();
   });
+
+  it.each([
+    ["pending_approval", "Approval required"],
+    ["approved", "Restart approved"],
+    ["claimed", "Restart in progress"],
+  ])(
+    "keeps active %s recovery ahead of an offline runner",
+    (recoveryStatus, heading) => {
+      convexMock.useQuery.mockReturnValue(
+        privateState({
+          runner: connectedRunner({ lastHeartbeatAt: Date.now() - 7_000 }),
+          workload: fixedWorkload({
+            healthStatus: "unhealthy",
+            healthDetailCode: "connection_failed",
+            currentInstanceId: null,
+          }),
+          latestRecovery: fixedRecovery(recoveryStatus),
+        }),
+      );
+
+      render(<ServerOnboarding />);
+
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+      expect(
+        screen.queryByRole("heading", { name: "Runner offline" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it.each([
+    ["failed", "execution_failed", "Restart command failed"],
+    ["rejected", "owner_rejected", "Recovery rejected"],
+    ["expired", "approval_expired", "Approval window expired"],
+    [
+      "execution_unknown",
+      "runner_lost_during_action",
+      "Runner lost during restart",
+    ],
+  ])(
+    "keeps terminal %s visible during a fresh unhealthy report and permits a new request",
+    (recoveryStatus, terminalReason, heading) => {
+      convexMock.useQuery.mockReturnValue(
+        privateState({
+          runner: connectedRunner(),
+          workload: fixedWorkload({
+            healthStatus: "unhealthy",
+            healthDetailCode: "connection_failed",
+            currentInstanceId: null,
+          }),
+          latestRecovery: fixedRecovery(recoveryStatus, { terminalReason }),
+        }),
+      );
+
+      render(<ServerOnboarding />);
+
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+      expect(
+        screen.getByRole("button", { name: "Prepare approval-first recovery" }),
+      ).toBeEnabled();
+      expect(
+        screen.queryByRole("heading", { name: "Service unhealthy" }),
+      ).not.toBeInTheDocument();
+    },
+  );
+
+  it("keeps a terminal failure visible while offline without offering another request", () => {
+    convexMock.useQuery.mockReturnValue(
+      privateState({
+        runner: connectedRunner({ lastHeartbeatAt: Date.now() - 7_000 }),
+        workload: fixedWorkload({
+          healthStatus: "unhealthy",
+          healthDetailCode: "connection_failed",
+          currentInstanceId: null,
+        }),
+        latestRecovery: fixedRecovery("failed", {
+          terminalReason: "verification_failed",
+        }),
+      }),
+    );
+
+    render(<ServerOnboarding />);
+
+    expect(
+      screen.getByRole("heading", { name: "Recovery verification failed" }),
+    ).toBeInTheDocument();
+    expect(
+      screen.queryByRole("button", { name: "Prepare approval-first recovery" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it("lets a newly unhealthy service outrank a previous not-needed result", () => {
+    convexMock.useQuery.mockReturnValue(
+      privateState({
+        runner: connectedRunner(),
+        workload: fixedWorkload({
+          healthStatus: "unhealthy",
+          healthDetailCode: "connection_failed",
+          currentInstanceId: null,
+        }),
+        latestRecovery: fixedRecovery("not_needed", {
+          terminalReason: "precondition_changed",
+        }),
+      }),
+    );
+
+    render(<ServerOnboarding />);
+
+    expect(screen.getByRole("heading", { name: "Service unhealthy" })).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Recovery not needed" }),
+    ).not.toBeInTheDocument();
+  });
+
+  it.each([
+    [
+      "expired",
+      "approval_expired",
+      "Approval window expired",
+      /expired before an owner approved it/i,
+    ],
+    [
+      "expired",
+      "command_expired",
+      "Approved restart expired",
+      /runner did not claim it before the deadline/i,
+    ],
+    [
+      "expired",
+      "runner_revoked_before_claim",
+      "Runner revoked before restart",
+      /revoked before it claimed the restart/i,
+    ],
+    [
+      "execution_unknown",
+      "runner_lost_during_action",
+      "Runner lost during restart",
+      /result cannot be confirmed or replayed/i,
+    ],
+    [
+      "execution_unknown",
+      "runner_revoked_after_claim",
+      "Runner revoked during restart",
+      /revoked after it claimed the restart/i,
+    ],
+    [
+      "failed",
+      "execution_failed",
+      "Restart command failed",
+      /runner reported that the fixed restart failed/i,
+    ],
+    [
+      "failed",
+      "verification_failed",
+      "Recovery verification failed",
+      /restart ran, but fresh verification did not prove/i,
+    ],
+  ])(
+    "maps %s reason %s to accurate terminal copy",
+    (status, terminalReason, heading, message) => {
+      convexMock.useQuery.mockReturnValue(
+        privateState({
+          runner: connectedRunner(),
+          workload: fixedWorkload(),
+          latestRecovery: fixedRecovery(status, { terminalReason }),
+        }),
+      );
+
+      render(<ServerOnboarding />);
+
+      expect(screen.getByRole("heading", { name: heading })).toBeInTheDocument();
+      expect(screen.getByText(message)).toBeInTheDocument();
+    },
+  );
 
   it("requires a fresh HTTP 200 and a changed service instance before showing verified", () => {
     convexMock.useQuery.mockReturnValue(
@@ -551,7 +761,141 @@ describe("server onboarding", () => {
     ).not.toBeInTheDocument();
   });
 
-  it("keeps technical identifiers collapsed and revocation separate from recovery", () => {
+  it("does not move focus when only the same runner heartbeat changes", () => {
+    let currentState = privateState({
+      runner: connectedRunner(),
+      workload: fixedWorkload(),
+    });
+    convexMock.useQuery.mockImplementation(() => currentState);
+
+    const { rerender } = render(<ServerOnboarding />);
+    const revoke = screen.getByRole("button", { name: "Revoke runner access" });
+    revoke.focus();
+    expect(revoke).toHaveFocus();
+
+    currentState = privateState({
+      runner: connectedRunner({ lastHeartbeatAt: Date.now() + 1_000 }),
+      workload: fixedWorkload({ healthReportedAt: Date.now() + 1_000 }),
+    });
+    rerender(<ServerOnboarding />);
+
+    expect(screen.getByRole("button", { name: "Revoke runner access" })).toHaveFocus();
+  });
+
+  it("announces passive heartbeat freshness without moving focus", () => {
+    let currentState = privateState({
+      runner: connectedRunner(),
+      workload: fixedWorkload(),
+    });
+    convexMock.useQuery.mockImplementation(() => currentState);
+
+    const { rerender } = render(<ServerOnboarding />);
+    expect(
+      screen.getByRole("status", { name: "Runner connection status" }),
+    ).toHaveTextContent("Runner heartbeat online");
+
+    currentState = privateState({
+      runner: connectedRunner({ lastHeartbeatAt: Date.now() - 7_000 }),
+      workload: fixedWorkload(),
+    });
+    rerender(<ServerOnboarding />);
+
+    expect(
+      screen.getByRole("status", { name: "Runner connection status" }),
+    ).toHaveTextContent("Runner heartbeat offline");
+  });
+
+  it("labels a paired but stale runner as heartbeat offline in the rail", () => {
+    convexMock.useQuery.mockReturnValue(
+      privateState({
+        runner: connectedRunner({ lastHeartbeatAt: Date.now() - 7_000 }),
+        workload: fixedWorkload(),
+      }),
+    );
+
+    render(<ServerOnboarding />);
+
+    const rail = screen.getByRole("list", { name: "Recovery authority path" });
+    const runnerNode = within(rail).getByText("Runner").closest("li");
+    expect(runnerNode).toHaveClass("connection-node-danger");
+    expect(within(runnerNode as HTMLElement).getByText("Heartbeat offline")).toBeInTheDocument();
+    expect(within(runnerNode as HTMLElement).queryByText("Connect first")).not.toBeInTheDocument();
+  });
+
+  it("blocks service registration while revocation is in flight", () => {
+    mutationMocks.revoke.mockImplementation(() => new Promise(() => undefined));
+    convexMock.useQuery.mockReturnValue(
+      privateState({ runner: connectedRunner() }),
+    );
+
+    render(<ServerOnboarding />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Revoke runner access" }));
+    const register = screen.getByRole("button", {
+      name: "Register disposable service",
+    });
+    expect(register).toBeDisabled();
+    fireEvent.click(register);
+
+    expect(mutationMocks.revoke).toHaveBeenCalledOnce();
+    expect(mutationMocks.registerFixedWorkload).not.toHaveBeenCalled();
+  });
+
+  it("blocks recovery preparation while revocation is in flight", () => {
+    mutationMocks.revoke.mockImplementation(() => new Promise(() => undefined));
+    convexMock.useQuery.mockReturnValue(
+      privateState({
+        runner: connectedRunner(),
+        workload: fixedWorkload({
+          healthStatus: "unhealthy",
+          healthDetailCode: "connection_failed",
+          currentInstanceId: null,
+        }),
+      }),
+    );
+
+    render(<ServerOnboarding />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Revoke runner access" }));
+    const prepare = screen.getByRole("button", {
+      name: "Prepare approval-first recovery",
+    });
+    expect(prepare).toBeDisabled();
+    fireEvent.click(prepare);
+
+    expect(mutationMocks.revoke).toHaveBeenCalledOnce();
+    expect(mutationMocks.requestFixedRecovery).not.toHaveBeenCalled();
+  });
+
+  it("blocks approval and rejection while revocation is in flight", () => {
+    mutationMocks.revoke.mockImplementation(() => new Promise(() => undefined));
+    convexMock.useQuery.mockReturnValue(
+      privateState({
+        runner: connectedRunner(),
+        workload: fixedWorkload({
+          healthStatus: "unhealthy",
+          healthDetailCode: "connection_failed",
+          currentInstanceId: null,
+        }),
+        latestRecovery: fixedRecovery("pending_approval"),
+      }),
+    );
+
+    render(<ServerOnboarding />);
+
+    fireEvent.click(screen.getByRole("button", { name: "Revoke runner access" }));
+    const approve = screen.getByRole("button", { name: "Approve fixed restart" });
+    const reject = screen.getByRole("button", { name: "Reject" });
+    expect(approve).toBeDisabled();
+    expect(reject).toBeDisabled();
+    fireEvent.click(approve);
+    fireEvent.click(reject);
+
+    expect(mutationMocks.revoke).toHaveBeenCalledOnce();
+    expect(mutationMocks.decideFixedRecovery).not.toHaveBeenCalled();
+  });
+
+  it("keeps technical identifiers collapsed and revocation separate from recovery", async () => {
     convexMock.useQuery.mockReturnValue(
       privateState({
         runner: connectedRunner(),
@@ -565,6 +909,35 @@ describe("server onboarding", () => {
     expect(identifiers).not.toHaveAttribute("open");
     const revoke = screen.getByRole("button", { name: "Revoke runner access" });
     expect(revoke.closest(".recovery-control")).toBeNull();
+    fireEvent.click(revoke);
+    await waitFor(() => expect(mutationMocks.revoke).toHaveBeenCalledOnce());
+    expect(mutationMocks.revoke).toHaveBeenCalledWith({
+      runnerId: "gxr_abcdefghijklmnopqrstuvwx",
+    });
+    expect(mutationMocks.decideFixedRecovery).not.toHaveBeenCalled();
+  });
+
+  it("keeps programmatically focused state headings visibly outlined", () => {
+    const styles = readFileSync(
+      join(process.cwd(), "src/app/globals.css"),
+      "utf8",
+    );
+
+    expect(styles).not.toContain("outline: none;");
+    expect(styles).toMatch(/\.recovery-control h3:focus\s*{[^}]*outline: 2px solid/);
+    expect(styles).toMatch(/\.onboarding-state h2:focus,[^{]*{[^}]*outline: 2px solid/);
+  });
+
+  it("keeps the phone authority rail vertical but compact", () => {
+    const styles = readFileSync(
+      join(process.cwd(), "src/app/globals.css"),
+      "utf8",
+    );
+    const phoneStyles = styles.slice(styles.indexOf("@media (max-width: 620px)"));
+
+    expect(phoneStyles).toMatch(/\.connection-line\s*{[^}]*display: block;/);
+    expect(phoneStyles).toMatch(/\.connection-line\s*{[^}]*height: 8px;/);
+    expect(phoneStyles).toMatch(/\.connection-node\s*{[^}]*padding: 8px 0;/);
   });
 
   it("denies framing through both legacy and modern response headers", () => {

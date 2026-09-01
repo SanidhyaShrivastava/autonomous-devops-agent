@@ -60,6 +60,63 @@ const RECOVERY_STATE_COPY = {
   },
 } as const;
 
+const RECOVERY_REASON_COPY = {
+  approval_expired: {
+    heading: "Approval window expired",
+    message:
+      "The request expired before an owner approved it. No restart was authorized.",
+    tone: "neutral",
+  },
+  command_expired: {
+    heading: "Approved restart expired",
+    message:
+      "The restart was approved, but the runner did not claim it before the deadline.",
+    tone: "neutral",
+  },
+  runner_revoked_before_claim: {
+    heading: "Runner revoked before restart",
+    message:
+      "Runner access was revoked before it claimed the restart. No action was executed.",
+    tone: "neutral",
+  },
+  runner_lost_during_action: {
+    heading: "Runner lost during restart",
+    message:
+      "The runner stopped reporting after it claimed the restart. The result cannot be confirmed or replayed.",
+    tone: "danger",
+  },
+  runner_revoked_after_claim: {
+    heading: "Runner revoked during restart",
+    message:
+      "Runner access was revoked after it claimed the restart. The result is unknown and will not be replayed.",
+    tone: "danger",
+  },
+  execution_failed: {
+    heading: "Restart command failed",
+    message:
+      "The runner reported that the fixed restart failed. The service was not marked recovered.",
+    tone: "danger",
+  },
+  verification_failed: {
+    heading: "Recovery verification failed",
+    message:
+      "The restart ran, but fresh verification did not prove a healthy new service instance.",
+    tone: "danger",
+  },
+} as const;
+
+function getRecoveryCopy(status: string, terminalReason?: string | null) {
+  if (terminalReason && terminalReason in RECOVERY_REASON_COPY) {
+    return RECOVERY_REASON_COPY[
+      terminalReason as keyof typeof RECOVERY_REASON_COPY
+    ];
+  }
+  if (status in RECOVERY_STATE_COPY) {
+    return RECOVERY_STATE_COPY[status as keyof typeof RECOVERY_STATE_COPY];
+  }
+  return null;
+}
+
 function base64Url(bytes: Uint8Array) {
   const binary = Array.from(bytes, (byte) => String.fromCharCode(byte)).join("");
   return window
@@ -113,6 +170,7 @@ export function ServerOnboarding() {
   const stateHeadingRef = useRef<HTMLHeadingElement>(null);
   const operationHeadingRef = useRef<HTMLHeadingElement>(null);
   const operationInFlightRef = useRef(false);
+  const revocationInFlightRef = useRef(false);
   const signOutStartedRef = useRef(false);
 
   const runner = state?.runner ?? null;
@@ -129,6 +187,7 @@ export function ServerOnboarding() {
   );
   const workload = state?.workload ?? null;
   const latestRecovery = state?.latestRecovery ?? null;
+  const activeRunnerId = activeRunner?.runnerId ?? null;
   const healthFresh = Boolean(
     workload?.healthReportedAt &&
       clock - workload.healthReportedAt < HEALTH_FRESHNESS_MS,
@@ -148,6 +207,20 @@ export function ServerOnboarding() {
   const recoveryFocusKey = workload
     ? `${workload.workloadId}:${workload.healthStatus}:${latestRecovery?.status ?? "none"}`
     : null;
+  const recoveryIsActive = Boolean(
+    latestRecovery?.status === "pending_approval" ||
+      latestRecovery?.status === "approved" ||
+      latestRecovery?.status === "claimed",
+  );
+  const recoveryIsStickyTerminal = Boolean(
+    latestRecovery?.status === "failed" ||
+      latestRecovery?.status === "rejected" ||
+      latestRecovery?.status === "expired" ||
+      latestRecovery?.status === "execution_unknown",
+  );
+  const latestRecoveryCopy = latestRecovery
+    ? getRecoveryCopy(latestRecovery.status, latestRecovery.terminalReason)
+    : null;
   const approvalWindowOpen = Boolean(
     latestRecovery?.status === "pending_approval" &&
       latestRecovery.deadlineAt > clock,
@@ -159,6 +232,30 @@ export function ServerOnboarding() {
       healthFresh &&
       workload?.healthStatus === "unhealthy",
   );
+  const recoveryPrerequisitesFresh = Boolean(
+    !recoveryIsActive &&
+      activeRunner &&
+      runnerOnline &&
+      capabilityFresh &&
+      workload &&
+      healthFresh &&
+      workload.healthStatus === "unhealthy",
+  );
+  const canPrepareFixedRecovery =
+    !isRevoking && recoveryPrerequisitesFresh;
+  const recoverySafetyStatus = !runnerOnline
+    ? "Recovery is blocked because the runner heartbeat is offline."
+    : !capabilityFresh
+      ? "Recovery is blocked because the fixed recovery capability is stale."
+      : !workload
+        ? "The fixed recovery capability is fresh. No service is registered yet."
+        : !healthFresh
+          ? "Recovery is blocked because the service health report is stale."
+          : workload.healthStatus === "unhealthy"
+            ? "The service is unhealthy. Recovery requires an owner decision."
+            : workload.healthStatus === "healthy"
+              ? "The service has a fresh healthy report."
+              : "Recovery is blocked while the first health report is pending.";
   const waitingEnrollment =
     state?.enrollment?.state === "waiting" ? state.enrollment : null;
   const showCreateForm =
@@ -166,16 +263,16 @@ export function ServerOnboarding() {
     (!waitingEnrollment || Boolean(issuedCode) || showReplacementForm);
 
   useEffect(() => {
-    if (!activeRunner) return;
+    if (!activeRunnerId) return;
     const timer = window.setInterval(() => setClock(Date.now()), 1_000);
     return () => window.clearInterval(timer);
-  }, [activeRunner]);
+  }, [activeRunnerId]);
 
   useEffect(() => {
-    if (activeRunner || issuedCode || showReplacementForm) {
+    if (activeRunnerId || issuedCode || showReplacementForm) {
       stateHeadingRef.current?.focus();
     }
-  }, [activeRunner, issuedCode, showReplacementForm]);
+  }, [activeRunnerId, issuedCode, showReplacementForm]);
 
   useEffect(() => {
     if (!recoveryFocusKey) return;
@@ -229,7 +326,16 @@ export function ServerOnboarding() {
   }
 
   async function handleRevoke() {
-    if (!activeRunner || isRevoking) return;
+    if (
+      !activeRunner ||
+      isRevoking ||
+      revocationInFlightRef.current ||
+      operationInFlightRef.current ||
+      pendingOperation !== null
+    ) {
+      return;
+    }
+    revocationInFlightRef.current = true;
     setIsRevoking(true);
     setNotice(null);
     try {
@@ -241,6 +347,7 @@ export function ServerOnboarding() {
     } catch {
       setNotice("Runner access could not be revoked. Try again.");
     } finally {
+      revocationInFlightRef.current = false;
       setIsRevoking(false);
     }
   }
@@ -251,7 +358,13 @@ export function ServerOnboarding() {
     successMessage: string,
     failureMessage: string,
   ) {
-    if (operationInFlightRef.current) return;
+    if (
+      operationInFlightRef.current ||
+      revocationInFlightRef.current ||
+      isRevoking
+    ) {
+      return;
+    }
     operationInFlightRef.current = true;
     setPendingOperation(operation);
     setNotice(null);
@@ -268,7 +381,15 @@ export function ServerOnboarding() {
   }
 
   function handleRegisterWorkload() {
-    if (!activeRunner || !capabilityFresh || workload) return;
+    if (
+      isRevoking ||
+      revocationInFlightRef.current ||
+      !activeRunner ||
+      !capabilityFresh ||
+      workload
+    ) {
+      return;
+    }
     void runOwnerOperation(
       "register",
       () => registerFixedWorkload({}),
@@ -280,14 +401,14 @@ export function ServerOnboarding() {
   function handlePrepareRecovery() {
     if (
       !activeRunner ||
+      isRevoking ||
+      revocationInFlightRef.current ||
       !capabilityFresh ||
       !runnerOnline ||
       !workload ||
       !healthFresh ||
       workload.healthStatus !== "unhealthy" ||
-      latestRecovery?.status === "pending_approval" ||
-      latestRecovery?.status === "approved" ||
-      latestRecovery?.status === "claimed"
+      !canPrepareFixedRecovery
     ) {
       return;
     }
@@ -300,7 +421,14 @@ export function ServerOnboarding() {
   }
 
   function handleRecoveryDecision(decision: "approved" | "rejected") {
-    if (!latestRecovery || latestRecovery.status !== "pending_approval") return;
+    if (
+      isRevoking ||
+      revocationInFlightRef.current ||
+      !latestRecovery ||
+      latestRecovery.status !== "pending_approval"
+    ) {
+      return;
+    }
     const approving = decision === "approved";
     if (!approvalWindowOpen || (approving && !canApproveFixedRecovery)) return;
     void runOwnerOperation(
@@ -355,12 +483,22 @@ export function ServerOnboarding() {
       <ol className="connection-rail" aria-label="Recovery authority path">
         <li
           className={`connection-node ${
-            runnerOnline ? "connection-node-online" : "connection-node-current"
+            runnerOnline
+              ? "connection-node-online"
+              : activeRunner
+                ? "connection-node-danger"
+                : "connection-node-current"
           }`}
         >
           <span>01</span>
           <strong>Runner</strong>
-          <small>{runnerOnline ? "Online" : "Connect first"}</small>
+          <small>
+            {runnerOnline
+              ? "Online"
+              : activeRunner
+                ? "Heartbeat offline"
+                : "Connect first"}
+          </small>
         </li>
         <li className="connection-line" aria-hidden="true">→</li>
         <li
@@ -455,9 +593,29 @@ export function ServerOnboarding() {
               <h2 id="connection-step-title" ref={stateHeadingRef} tabIndex={-1}>
                 Runner connected
               </h2>
-              <span className={`system-badge ${runnerOnline ? "badge-online" : "badge-offline"}`}>
+              <span
+                className={`system-badge ${runnerOnline ? "badge-online" : "badge-offline"}`}
+              >
                 <span className="status-dot" aria-hidden="true" />
                 {runnerOnline ? "Online" : "Heartbeat offline"}
+              </span>
+              <span
+                aria-label="Runner connection status"
+                aria-live="polite"
+                className="visually-hidden"
+                role="status"
+              >
+                {runnerOnline
+                  ? "Runner heartbeat online."
+                  : "Runner heartbeat offline."}
+              </span>
+              <span
+                aria-label="Recovery safety status"
+                aria-live="polite"
+                className="visually-hidden"
+                role="status"
+              >
+                {recoverySafetyStatus}
               </span>
               <p className="runner-summary">
                 <strong>{activeRunner.label}</strong>
@@ -482,7 +640,7 @@ export function ServerOnboarding() {
                       </p>
                       <button
                         className="primary-action recovery-primary-action"
-                        disabled={pendingOperation !== null}
+                        disabled={isRevoking || pendingOperation !== null}
                         onClick={handleRegisterWorkload}
                         type="button"
                       >
@@ -539,7 +697,9 @@ export function ServerOnboarding() {
                           <button
                             className="approval-owner-action"
                             disabled={
-                              pendingOperation !== null || !canApproveFixedRecovery
+                              isRevoking ||
+                              pendingOperation !== null ||
+                              !canApproveFixedRecovery
                             }
                             onClick={() => handleRecoveryDecision("approved")}
                             type="button"
@@ -550,7 +710,11 @@ export function ServerOnboarding() {
                           </button>
                           <button
                             className="rejection-owner-action"
-                            disabled={pendingOperation !== null || !approvalWindowOpen}
+                            disabled={
+                              isRevoking ||
+                              pendingOperation !== null ||
+                              !approvalWindowOpen
+                            }
                             onClick={() => handleRecoveryDecision("rejected")}
                             type="button"
                           >
@@ -586,6 +750,32 @@ export function ServerOnboarding() {
                             ].message
                           }
                         </p>
+                      </div>
+                    ) : recoveryIsStickyTerminal && latestRecoveryCopy ? (
+                      <div
+                        className={`recovery-outcome recovery-outcome-${latestRecoveryCopy.tone}`}
+                      >
+                        <p className="section-kicker">Latest recovery</p>
+                        <h3
+                          id="recovery-state-title"
+                          ref={operationHeadingRef}
+                          tabIndex={-1}
+                        >
+                          {latestRecoveryCopy.heading}
+                        </h3>
+                        <p>{latestRecoveryCopy.message}</p>
+                        {recoveryPrerequisitesFresh ? (
+                          <button
+                            className="primary-action recovery-primary-action"
+                            disabled={isRevoking || pendingOperation !== null}
+                            onClick={handlePrepareRecovery}
+                            type="button"
+                          >
+                            {pendingOperation === "prepare"
+                              ? "Preparing recovery…"
+                              : "Prepare approval-first recovery"}
+                          </button>
+                        ) : null}
                       </div>
                     ) : !runnerOnline ? (
                       <div className="recovery-outcome recovery-outcome-danger">
@@ -643,7 +833,7 @@ export function ServerOnboarding() {
                         </p>
                         <button
                           className="primary-action recovery-primary-action"
-                          disabled={pendingOperation !== null}
+                          disabled={isRevoking || pendingOperation !== null}
                           onClick={handlePrepareRecovery}
                           type="button"
                         >
@@ -687,13 +877,9 @@ export function ServerOnboarding() {
                           </p>
                         </div>
                       )
-                    ) : latestRecovery && latestRecovery.status in RECOVERY_STATE_COPY ? (
+                    ) : latestRecoveryCopy ? (
                       <div
-                        className={`recovery-outcome recovery-outcome-${
-                          RECOVERY_STATE_COPY[
-                            latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
-                          ].tone
-                        }`}
+                        className={`recovery-outcome recovery-outcome-${latestRecoveryCopy.tone}`}
                       >
                         <p className="section-kicker">Latest recovery</p>
                         <h3
@@ -701,19 +887,9 @@ export function ServerOnboarding() {
                           ref={operationHeadingRef}
                           tabIndex={-1}
                         >
-                          {
-                            RECOVERY_STATE_COPY[
-                              latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
-                            ].heading
-                          }
+                          {latestRecoveryCopy.heading}
                         </h3>
-                        <p>
-                          {
-                            RECOVERY_STATE_COPY[
-                              latestRecovery.status as keyof typeof RECOVERY_STATE_COPY
-                            ].message
-                          }
-                        </p>
+                        <p>{latestRecoveryCopy.message}</p>
                       </div>
                     ) : (
                       <div className="recovery-outcome recovery-outcome-success">
