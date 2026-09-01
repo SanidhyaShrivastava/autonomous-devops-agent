@@ -20,7 +20,10 @@ export const DAILY_REQUEST_CAP = 30;
 export const PUBLIC_OUTPUT_LIMIT = 4_000;
 export const PUBLIC_STEP_LIMIT = 100;
 
-type SecretName = "DEMO_REQUEST_SECRET" | "RUNNER_TOKEN";
+type SecretName =
+  | "DEMO_REQUEST_SECRET"
+  | "RUNNER_TOKEN"
+  | "RUNNER_PAIRING_REQUEST_SECRET";
 
 function configuredSecret(name: SecretName) {
   const value = process.env[name];
@@ -42,6 +45,10 @@ export function requireDemoRequestSecret(supplied: string) {
 
 export function requireRunnerToken(supplied: string) {
   requireExactSecret("RUNNER_TOKEN", supplied);
+}
+
+export function requireRunnerPairingRequestSecret(supplied: string) {
+  requireExactSecret("RUNNER_PAIRING_REQUEST_SECRET", supplied);
 }
 
 export function rejectWithCode(code: string): never {

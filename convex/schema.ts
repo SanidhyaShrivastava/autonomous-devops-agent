@@ -84,6 +84,11 @@ const costStatus = v.union(
   v.literal("unavailable_chatgpt_subscription"),
 );
 
+const runnerArchitecture = v.union(
+  v.literal("x64"),
+  v.literal("arm64"),
+);
+
 export default defineSchema({
   ...authTables,
 
@@ -91,6 +96,35 @@ export default defineSchema({
     label: v.string(),
     createdAt: v.number(),
   }),
+
+  runnerPairingInvites: defineTable({
+    ownerId: v.id("users"),
+    label: v.string(),
+    codeDigest: v.string(),
+    createdAt: v.number(),
+    expiresAt: v.number(),
+    consumedAt: v.optional(v.number()),
+    cancelledAt: v.optional(v.number()),
+    runnerRecordId: v.optional(v.id("registeredRunners")),
+  })
+    .index("by_code_digest", ["codeDigest"])
+    .index("by_owner_created_at", ["ownerId", "createdAt"]),
+
+  registeredRunners: defineTable({
+    ownerId: v.id("users"),
+    enrollmentId: v.id("runnerPairingInvites"),
+    runnerId: v.string(),
+    label: v.string(),
+    credentialDigest: v.string(),
+    osFamily: v.literal("linux"),
+    architecture: runnerArchitecture,
+    agentVersion: v.string(),
+    pairedAt: v.number(),
+    lastHeartbeatAt: v.optional(v.number()),
+    revokedAt: v.optional(v.number()),
+  })
+    .index("by_runner_id", ["runnerId"])
+    .index("by_owner_paired_at", ["ownerId", "pairedAt"]),
 
   demoControl: defineTable({
     key: v.literal("singleton"),

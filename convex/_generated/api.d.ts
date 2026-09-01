@@ -15,6 +15,7 @@ import type * as http from "../http.js";
 import type * as lib_auth from "../lib/auth.js";
 import type * as lib_guards from "../lib/guards.js";
 import type * as runner from "../runner.js";
+import type * as runners from "../runners.js";
 import type * as setupChecks from "../setupChecks.js";
 
 import type {
@@ -31,6 +32,7 @@ declare const fullApi: ApiFromModules<{
   "lib/auth": typeof lib_auth;
   "lib/guards": typeof lib_guards;
   runner: typeof runner;
+  runners: typeof runners;
   setupChecks: typeof setupChecks;
 }>;
 
