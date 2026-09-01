@@ -703,6 +703,38 @@ describe("server onboarding", () => {
     expect(screen.getByText("instance-after-recovery")).toBeInTheDocument();
   });
 
+  it("keeps stored recovery proof after a later healthy runner restart", () => {
+    convexMock.useQuery.mockReturnValue(
+      privateState({
+        runner: connectedRunner(),
+        workload: fixedWorkload({
+          currentInstanceId: "instance-from-later-runner-start",
+          lastHealthyInstanceId: "instance-from-later-runner-start",
+        }),
+        latestRecovery: fixedRecovery("succeeded", {
+          approvedAt: Date.now() - 1_500,
+          claimedAt: Date.now() - 1_300,
+          executionResultCode: "restart_succeeded",
+          verificationStatus: "healthy",
+          verificationDetailCode: "exact_http_200",
+          postActionInstanceId: "instance-after-recovery",
+          terminalReason: "verified_fresh_instance",
+          finishedAt: Date.now() - 1_000,
+        }),
+      }),
+    );
+
+    render(<ServerOnboarding />);
+
+    expect(
+      screen.getByRole("heading", { name: "Recovery verified" }),
+    ).toBeInTheDocument();
+    expect(screen.getByText("instance-after-recovery")).toBeInTheDocument();
+    expect(
+      screen.queryByRole("heading", { name: "Verification evidence incomplete" }),
+    ).not.toBeInTheDocument();
+  });
+
   it("lets a newly unhealthy service outrank a previous successful recovery", () => {
     convexMock.useQuery.mockReturnValue(
       privateState({

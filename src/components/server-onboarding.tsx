@@ -199,16 +199,15 @@ export function ServerOnboarding() {
       latestRecovery.verificationDetailCode === "exact_http_200" &&
       latestRecovery.postActionInstanceId &&
       latestRecovery.postActionInstanceId !==
-        latestRecovery.preActionInstanceId &&
-      healthFresh &&
-      workload?.healthStatus === "healthy" &&
-      workload.currentInstanceId === latestRecovery.postActionInstanceId,
+        latestRecovery.preActionInstanceId,
   );
   const previousSuccessSuperseded = Boolean(
     latestRecovery?.status === "succeeded" &&
       healthFresh &&
       workload?.healthStatus === "unhealthy",
   );
+  const recoveryPathVerified =
+    recoveryVerified && !previousSuccessSuperseded;
   const recoveryFocusKey = workload
     ? `${workload.workloadId}:${workload.healthStatus}:${latestRecovery?.status ?? "none"}`
     : null;
@@ -536,7 +535,7 @@ export function ServerOnboarding() {
               ? "connection-node-current connection-node-warning"
               : latestRecovery?.status === "approved" ||
                   latestRecovery?.status === "claimed" ||
-                  recoveryVerified
+                  recoveryPathVerified
                 ? "connection-node-online"
                 : ""
           }`}
@@ -558,7 +557,7 @@ export function ServerOnboarding() {
               ? "connection-node-current connection-node-warning"
               : latestRecovery?.status === "claimed"
                 ? "connection-node-current"
-                : recoveryVerified
+                : recoveryPathVerified
                   ? "connection-node-online"
                   : ""
           }`}
@@ -568,7 +567,7 @@ export function ServerOnboarding() {
           <small>
             {latestRecovery?.status === "claimed"
               ? "Executing"
-              : recoveryVerified
+              : recoveryPathVerified
                 ? "Completed"
                 : "Fixed action only"}
           </small>
@@ -576,12 +575,14 @@ export function ServerOnboarding() {
         <li className="connection-line" aria-hidden="true">→</li>
         <li
           className={`connection-node ${
-            recoveryVerified ? "connection-node-online" : ""
+            recoveryPathVerified ? "connection-node-online" : ""
           }`}
         >
           <span>05</span>
           <strong>Verified</strong>
-          <small>{recoveryVerified ? "Fresh instance healthy" : "Not reached"}</small>
+          <small>
+            {recoveryPathVerified ? "Recovery was verified" : "Not reached"}
+          </small>
         </li>
       </ol>
 

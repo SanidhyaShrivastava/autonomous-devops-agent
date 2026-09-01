@@ -18,3 +18,4 @@
 - A visitor can now take time to review an approval request and still complete the restart and fresh verification without the earlier run timer expiring during that human wait.
 - A signed-in engineer can now pair one non-sensitive Linux runner with a one-time owner-bound code, see its live heartbeat, and revoke its credential without enabling logs or recovery actions.
 - A signed-in engineer can now register the bundled disposable service on an owner-bound Linux runner, reject or approve one fixed restart, and see recovery only after a fresh HTTP 200 from a changed service instance.
+- A signed-in engineer now keeps the stored verified recovery record after a later healthy runner restart changes the current service instance, while a new unhealthy report still takes priority.
